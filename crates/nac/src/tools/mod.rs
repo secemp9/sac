@@ -6,6 +6,7 @@ use crate::types::ToolDefinition;
 pub mod bash;
 pub mod edit;
 pub mod read;
+pub mod thread;
 pub mod write;
 
 pub struct ToolResult {
@@ -76,6 +77,22 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+pub fn thread_definition() -> ToolDefinition {
+    use serde_json::json;
+    def(
+        "thread",
+        "Spawn a worker thread to execute a bounded coding task. The worker gets its own context and tools (read, write, edit, bash). Returns a summary of what it did. Use for: analyzing code, implementing changes, running tests. Pass context from prior threads to chain work.",
+        json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "description": "The task for the worker to complete" },
+                "context": { "type": "string", "description": "Episode from a prior thread to provide as input context (optional)" }
+            },
+            "required": ["prompt"]
+        }),
+    )
+}
+
 fn def(name: &str, description: &str, parameters: Value) -> ToolDefinition {
     ToolDefinition {
         def_type: "function".to_string(),
@@ -103,11 +120,9 @@ pub async fn execute_tool(name: &str, args: Value) -> ToolResult {
         "write" => write::execute(args).await,
         "edit" => edit::execute(args).await,
         "bash" => bash::execute(args).await,
+        "thread" => thread::execute(args).await,
         unknown => ToolResult {
-            content: format!(
-                "Error: unknown tool '{}'. Available tools: read, write, edit, bash",
-                unknown
-            ),
+            content: format!("Error: unknown tool '{}'", unknown),
             is_error: true,
         },
     }

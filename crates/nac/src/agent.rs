@@ -5,6 +5,11 @@ use crate::api::OpenAiClient;
 use crate::tools::{self, ToolResult};
 use crate::types::{Message, ToolCall, ToolDefinition};
 
+pub enum AgentMode {
+    Worker,
+    Orchestrator,
+}
+
 pub struct Agent {
     client: OpenAiClient,
     max_iterations: usize,
@@ -16,6 +21,10 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(client: OpenAiClient) -> Self {
+        Self::with_mode(client, AgentMode::Worker)
+    }
+
+    pub fn with_mode(client: OpenAiClient, mode: AgentMode) -> Self {
         let max_iterations = std::env::var("AGENT_MAX_ITERATIONS")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -28,21 +37,46 @@ impl Agent {
         let cwd = std::env::current_dir()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| ".".to_string());
-        let messages = vec![Message::System {
-            content: format!(
-                "You are a coding assistant named nac. Working directory: {}. \
-                 You help users with coding tasks by reading, writing, and editing files and running commands. \
-                 Be concise.",
-                cwd
+
+        let (system_prompt, tool_defs) = match mode {
+            AgentMode::Worker => (
+                format!(
+                    "You are nac, a coding worker. Working directory: {}. \
+                     Complete the given task using your tools. Be thorough in your work \
+                     but concise in your final response — your response will be used as \
+                     context by the orchestrator that dispatched you.",
+                    cwd
+                ),
+                tools::tool_definitions(),
             ),
-        }];
+            AgentMode::Orchestrator => (
+                format!(
+                    "You are nac, a coding agent orchestrator. Working directory: {}.\n\n\
+                     You plan and coordinate coding tasks by dispatching worker threads. \
+                     Each thread gets its own context and can read, write, edit files and \
+                     run commands. Threads return a summary (episode) of what they did.\n\n\
+                     Strategy:\n\
+                     - Analyze before implementing: dispatch a thread to read and understand code first\n\
+                     - Use episodes from analysis threads as context for implementation threads\n\
+                     - Verify after implementing: dispatch a thread to run tests or check results\n\
+                     - You can dispatch multiple threads in a single turn for parallel execution\n\n\
+                     You MUST use threads for all coding work. Do not attempt to read, write, \
+                     or edit files yourself — you do not have those tools. Your job is to \
+                     think strategically and delegate tactically.",
+                    cwd
+                ),
+                vec![tools::thread_definition()],
+            ),
+        };
+
+        let messages = vec![Message::System { content: system_prompt }];
 
         Self {
             client,
             max_iterations,
             max_context_tokens,
             messages,
-            tool_defs: tools::tool_definitions(),
+            tool_defs,
             last_token_count: 0,
         }
     }

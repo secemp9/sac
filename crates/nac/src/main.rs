@@ -5,7 +5,7 @@ use std::process;
 use anyhow::Result;
 use clap::Parser;
 
-use nac::agent::Agent;
+use nac::agent::{Agent, AgentMode};
 use nac::api::OpenAiClient;
 
 #[derive(Parser)]
@@ -20,6 +20,10 @@ struct Cli {
     /// Run prompt and exit (no REPL)
     #[arg(long)]
     single: bool,
+
+    /// Orchestrator mode: dispatches worker threads instead of editing files directly
+    #[arg(long)]
+    orchestrator: bool,
 }
 
 #[tokio::main]
@@ -37,8 +41,13 @@ async fn run() -> Result<()> {
         std::env::set_current_dir(&dir)?;
     }
 
+    if cli.single && cli.prompt.is_none() {
+        anyhow::bail!("--single requires a prompt");
+    }
+
     let client = OpenAiClient::from_env()?;
-    let mut agent = Agent::new(client);
+    let mode = if cli.orchestrator { AgentMode::Orchestrator } else { AgentMode::Worker };
+    let mut agent = Agent::with_mode(client, mode);
 
     if let Some(prompt) = cli.prompt {
         let response = agent.send(&prompt).await?;

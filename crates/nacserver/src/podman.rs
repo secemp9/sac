@@ -11,10 +11,20 @@ pub async fn check_available() -> Result<()> {
     Ok(())
 }
 
-pub async fn run_container(name: &str, image: &str, workspace: &Path, env_vars: &[(&str, &str)]) -> Result<()> {
+pub struct RunResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+pub async fn run_ephemeral(
+    image: &str,
+    workspace: &Path,
+    env_vars: &[(&str, &str)],
+    prompt: &str,
+) -> Result<RunResult> {
     let mut args = vec![
-        "run".to_string(), "-d".to_string(),
-        "--name".to_string(), name.to_string(),
+        "run".to_string(), "--rm".to_string(),
         "-v".to_string(), format!("{}:/workspace", workspace.display()),
         "-w".to_string(), "/workspace".to_string(),
     ];
@@ -23,40 +33,20 @@ pub async fn run_container(name: &str, image: &str, workspace: &Path, env_vars: 
         args.push(format!("{}={}", k, v));
     }
     args.push(image.to_string());
-    args.push("sleep".to_string());
-    args.push("infinity".to_string());
+    args.push("nac".to_string());
+    args.push("--orchestrator".to_string());
+    args.push("--single".to_string());
+    args.push(prompt.to_string());
 
     let output = Command::new("podman")
         .args(&args)
         .output()
-        .await?;
+        .await
+        .map_err(|e| anyhow!("podman run failed: {}", e))?;
 
-    if !output.status.success() {
-        return Err(anyhow!("podman run failed: {}", String::from_utf8_lossy(&output.stderr)));
-    }
-    Ok(())
-}
-
-pub struct ExecResult {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-}
-
-pub async fn exec_in_container(name: &str, prompt: &str) -> Result<ExecResult> {
-    let output = Command::new("podman")
-        .args(["exec", name, "nac", "--single", prompt])
-        .output()
-        .await?;
-
-    Ok(ExecResult {
+    Ok(RunResult {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         exit_code: output.status.code().unwrap_or(-1),
     })
-}
-
-pub async fn remove_container(name: &str) -> Result<()> {
-    let _ = Command::new("podman").args(["rm", "-f", name]).output().await?;
-    Ok(())
 }

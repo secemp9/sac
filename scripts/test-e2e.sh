@@ -23,21 +23,41 @@ trap "kill $SERVER_PID 2>/dev/null; exit" EXIT
 echo "=== Health check ==="
 curl -sf http://localhost:3123/health | jq .
 
-echo "=== Creating session ==="
-SESSION=$(curl -sf -X POST http://localhost:3123/sessions \
+echo "=== Creating task ==="
+TASK_ID=$(curl -sf -X POST http://localhost:3123/tasks \
   -H "Content-Type: application/json" \
-  -d '{"image": "nac:base"}' | jq -r '.session_id')
-echo "Session: $SESSION"
+  -d '{"prompt": "Create a file called hello.txt containing hello from nac", "image": "nac:base"}' | jq -r '.task_id')
+echo "Task: $TASK_ID"
 
-echo "=== Sending message ==="
-curl -sf -X POST "http://localhost:3123/sessions/$SESSION/message" \
+echo "=== Polling for completion ==="
+for i in $(seq 1 60); do
+  STATUS=$(curl -sf "http://localhost:3123/tasks/$TASK_ID" | jq -r '.status')
+  echo "  [$i] status: $STATUS"
+  if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+    break
+  fi
+  sleep 5
+done
+
+echo "=== Task result ==="
+curl -sf "http://localhost:3123/tasks/$TASK_ID" | jq .
+
+echo "=== Follow-up task ==="
+TASK_ID2=$(curl -sf -X POST http://localhost:3123/tasks \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "Create a file called /workspace/hello.txt containing hello from nac"}' | jq .
+  -d "{\"prompt\": \"Read hello.txt and tell me what it says\", \"image\": \"nac:base\", \"parent_task_id\": \"$TASK_ID\"}" | jq -r '.task_id')
+echo "Follow-up task: $TASK_ID2"
 
-echo "=== Verifying file was created ==="
-podman exec "nac-${SESSION:0:8}" cat /workspace/hello.txt
+for i in $(seq 1 60); do
+  STATUS=$(curl -sf "http://localhost:3123/tasks/$TASK_ID2" | jq -r '.status')
+  echo "  [$i] status: $STATUS"
+  if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+    break
+  fi
+  sleep 5
+done
 
-echo "=== Deleting session ==="
-curl -sf -X DELETE "http://localhost:3123/sessions/$SESSION"
+echo "=== Follow-up result ==="
+curl -sf "http://localhost:3123/tasks/$TASK_ID2" | jq .
 
 echo "=== PASS ==="
