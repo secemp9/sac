@@ -11,17 +11,23 @@ pub async fn check_available() -> Result<()> {
     Ok(())
 }
 
-pub async fn run_container(name: &str, image: &str, workspace: &Path, api_key: &str) -> Result<()> {
+pub async fn run_container(name: &str, image: &str, workspace: &Path, env_vars: &[(&str, &str)]) -> Result<()> {
+    let mut args = vec![
+        "run".to_string(), "-d".to_string(),
+        "--name".to_string(), name.to_string(),
+        "-v".to_string(), format!("{}:/workspace", workspace.display()),
+        "-w".to_string(), "/workspace".to_string(),
+    ];
+    for (k, v) in env_vars {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", k, v));
+    }
+    args.push(image.to_string());
+    args.push("sleep".to_string());
+    args.push("infinity".to_string());
+
     let output = Command::new("podman")
-        .args([
-            "run", "-d",
-            "--name", name,
-            "-v", &format!("{}:/workspace", workspace.display()),
-            "-w", "/workspace",
-            "-e", &format!("OPENAI_API_KEY={}", api_key),
-            image,
-            "sleep", "infinity",
-        ])
+        .args(&args)
         .output()
         .await?;
 

@@ -1,7 +1,10 @@
 FROM ghcr.io/astral-sh/uv:python3.13-trixie-slim
+LABEL org.opencontainers.image.description="basic agents"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl ca-certificates build-essential \
   && rm -rf /var/lib/apt/lists/*
 COPY nac /usr/local/bin/nac
 RUN chmod +x /usr/local/bin/nac
 WORKDIR /workspace
+ENTRYPOINT []
+CMD ["nac"]

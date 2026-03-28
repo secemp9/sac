@@ -63,6 +63,9 @@ async fn run() -> Result<()> {
         if input.is_empty() {
             continue;
         }
+        if input == "/exit" {
+            break;
+        }
 
         match agent.send(input).await {
             Ok(response) => println!("{}", response),

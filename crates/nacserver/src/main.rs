@@ -18,6 +18,8 @@ use session::{Session, SessionStore};
 struct AppState {
     sessions: SessionStore,
     api_key: String,
+    base_url: String,
+    model: String,
     default_image: String,
 }
 
@@ -26,12 +28,16 @@ async fn main() -> Result<()> {
     podman::check_available().await?;
 
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_default();
+    let model = std::env::var("OPENAI_MODEL").unwrap_or_default();
     let default_image = std::env::var("NAC_DEFAULT_IMAGE").unwrap_or_else(|_| "nac:base".to_string());
     let port: u16 = std::env::var("NAC_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
 
     let state = AppState {
         sessions: session::new_store(),
         api_key,
+        base_url,
+        model,
         default_image,
     };
 
@@ -91,7 +97,15 @@ async fn create_session(
         }
     }
 
-    podman::run_container(&container_name, &image, &workspace, &state.api_key)
+    let mut env_vars: Vec<(&str, &str)> = vec![("OPENAI_API_KEY", &state.api_key)];
+    if !state.base_url.is_empty() {
+        env_vars.push(("OPENAI_BASE_URL", &state.base_url));
+    }
+    if !state.model.is_empty() {
+        env_vars.push(("OPENAI_MODEL", &state.model));
+    }
+
+    podman::run_container(&container_name, &image, &workspace, &env_vars)
         .await
         .map_err(|e| {
             let _ = std::fs::remove_dir_all(&workspace);
