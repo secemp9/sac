@@ -16,6 +16,10 @@ struct Cli {
     /// Working directory (default: current directory)
     #[arg(short = 'C', long)]
     directory: Option<PathBuf>,
+
+    /// Run prompt and exit (no REPL)
+    #[arg(long)]
+    single: bool,
 }
 
 #[tokio::main]
@@ -39,6 +43,9 @@ async fn run() -> Result<()> {
     if let Some(prompt) = cli.prompt {
         let response = agent.send(&prompt).await?;
         println!("{}", response);
+        if cli.single {
+            return Ok(());
+        }
     }
 
     let stdin = io::stdin();
