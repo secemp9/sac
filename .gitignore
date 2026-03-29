@@ -2,3 +2,4 @@
 .env
 images/nac
 nac.db
+.nac/

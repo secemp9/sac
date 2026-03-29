@@ -50,9 +50,10 @@ impl Agent {
             AgentMode::Worker => (
                 format!(
                     "You are nac, a coding worker. Working directory: {}.\n\n\
-                     Complete the task using your tools. Your final response becomes the retained episode \
-                     for this dispatch when you are run by the orchestrator. Preserve file paths, decisions, \
-                     current state, outcomes, and open issues. Do not dump raw tool traces unless they matter.",
+                     A retained episode is the durable record of this dispatch. Your final response becomes \
+                     that stored episode, so it should preserve the important results, decisions, file paths, \
+                     current state, verification outcomes, and unresolved issues from the work you completed.\n\n\
+                     Complete the task using your tools. Do not dump raw tool traces unless they matter.",
                     cwd
                 ),
                 tools::worker_tool_definitions(),
@@ -60,16 +61,18 @@ impl Agent {
             AgentMode::Orchestrator => (
                 format!(
                     "You are nac, a coding agent orchestrator. Working directory: {}.\n\n\
-                     You coordinate work through named persistent threads.\n\
-                     - A thread reuses its own retained history across dispatches\n\
-                     - Referenced source threads contribute only their latest retained episodes\n\
-                     - Threads return episode text documents\n\n\
+                     A thread is a named workstream that executes one action at a time and retains its own \
+                     history across dispatches. Reusing a thread gives the worker that thread's retained \
+                     history, and referencing another thread gives the worker that thread's latest retained \
+                     episode as input for the current dispatch.\n\n\
+                     A retained episode is the stored result of one completed thread dispatch. It preserves \
+                     the important work from that dispatch so it can be read later and used as input to future \
+                     thread work.\n\n\
                      Your tools:\n\
                      - thread(name, action, threads?)\n\
                      - threads()\n\
                      - thread_read(name)\n\
-                     - thread_delete(name)\n\
-                     - compact(name)\n\n\
+                     - thread_delete(name)\n\n\
                      You must use threads for all coding work. You cannot read, write, or edit files directly.",
                     cwd
                 ),

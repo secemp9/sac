@@ -94,7 +94,6 @@ pub fn orchestrator_tool_definitions() -> Vec<ToolDefinition> {
         thread::threads_definition(),
         thread::thread_read_definition(),
         thread::thread_delete_definition(),
-        thread::compact_definition(),
     ]
 }
 
@@ -149,7 +148,7 @@ pub async fn execute_tool(
     name: &str,
     args: Value,
     runtime: &ToolRuntime,
-    client: &crate::api::OpenAiClient,
+    _client: &crate::api::OpenAiClient,
 ) -> ToolResult {
     match name {
         "read" => read::execute(args).await,
@@ -160,7 +159,6 @@ pub async fn execute_tool(
         "threads" => thread::execute_threads(runtime).await,
         "thread_read" => thread::execute_thread_read(args, runtime).await,
         "thread_delete" => thread::execute_thread_delete(args, runtime).await,
-        "compact" => thread::execute_compact(args, runtime, client).await,
         unknown => ToolResult {
             content: format!("Error: unknown tool '{}'", unknown),
             is_error: true,

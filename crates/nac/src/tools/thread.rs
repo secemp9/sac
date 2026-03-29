@@ -74,21 +74,6 @@ pub fn thread_delete_definition() -> ToolDefinition {
     )
 }
 
-pub fn compact_definition() -> ToolDefinition {
-    use serde_json::json;
-    def(
-        "compact",
-        "Compact one thread into a single retained episode.",
-        json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string", "description": "Thread name." }
-            },
-            "required": ["name"]
-        }),
-    )
-}
-
 pub async fn execute_dispatch(args: Value, runtime: &ToolRuntime) -> ToolResult {
     let thread_name = match require_str(&args, "name") {
         Ok(s) => s,
@@ -262,42 +247,6 @@ pub async fn execute_thread_delete(args: Value, runtime: &ToolRuntime) -> ToolRe
         },
         Err(error) => ToolResult {
             content: format!("Error deleting thread '{}': {}", thread_name, error),
-            is_error: true,
-        },
-    }
-}
-
-pub async fn execute_compact(
-    args: Value,
-    runtime: &ToolRuntime,
-    client: &OpenAiClient,
-) -> ToolResult {
-    let thread_name = match require_str(&args, "name") {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let session_id = match require_session(runtime) {
-        Ok(s) => s.to_string(),
-        Err(e) => return e,
-    };
-
-    if is_thread_active(runtime, &thread_name).await {
-        return ToolResult {
-            content: format!(
-                "Thread '{}' is currently running; wait for it to finish before compacting it.",
-                thread_name
-            ),
-            is_error: true,
-        };
-    }
-
-    match compact_thread(runtime, client, &session_id, &thread_name).await {
-        Ok(message) => ToolResult {
-            content: message,
-            is_error: false,
-        },
-        Err(error) => ToolResult {
-            content: format!("Error compacting thread '{}': {}", thread_name, error),
             is_error: true,
         },
     }
