@@ -1,85 +1,110 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use anyhow::{anyhow, Result};
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::api::OpenAiClient;
-use crate::tools::{self, ToolResult};
+use crate::tools::{self, ToolResult, ToolRuntime};
 use crate::types::{Message, ToolCall, ToolDefinition};
 
+#[derive(Clone, Copy, Debug)]
 pub enum AgentMode {
     Worker,
     Orchestrator,
 }
 
+pub struct AgentConfig {
+    pub mode: AgentMode,
+    pub store_path: PathBuf,
+    pub session_id: Option<String>,
+    pub initial_messages: Vec<Message>,
+}
+
 pub struct Agent {
     client: OpenAiClient,
     max_iterations: usize,
-    max_context_tokens: usize,
     pub messages: Vec<Message>,
     tool_defs: Vec<ToolDefinition>,
-    last_token_count: usize,
+    tool_runtime: ToolRuntime,
 }
 
 impl Agent {
     pub fn new(client: OpenAiClient) -> Self {
-        Self::with_mode(client, AgentMode::Worker)
+        Self::default(client)
     }
 
-    pub fn with_mode(client: OpenAiClient, mode: AgentMode) -> Self {
+    pub fn with_config(client: OpenAiClient, config: AgentConfig) -> Self {
         let max_iterations = std::env::var("AGENT_MAX_ITERATIONS")
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(100);
-        let max_context_tokens = std::env::var("AGENT_MAX_CONTEXT_TOKENS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(120_000);
 
         let cwd = std::env::current_dir()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| ".".to_string());
 
-        let (system_prompt, tool_defs) = match mode {
+        let (system_prompt, tool_defs) = match config.mode {
             AgentMode::Worker => (
                 format!(
-                    "You are nac, a coding worker. Working directory: {}. \
-                     Complete the given task using your tools. Be thorough in your work \
-                     but concise in your final response — your response will be used as \
-                     context by the orchestrator that dispatched you.",
+                    "You are nac, a coding worker. Working directory: {}.\n\n\
+                     Complete the task using your tools. Your final response becomes the retained episode \
+                     for this dispatch when you are run by the orchestrator. Preserve file paths, decisions, \
+                     current state, outcomes, and open issues. Do not dump raw tool traces unless they matter.",
                     cwd
                 ),
-                tools::tool_definitions(),
+                tools::worker_tool_definitions(),
             ),
             AgentMode::Orchestrator => (
                 format!(
                     "You are nac, a coding agent orchestrator. Working directory: {}.\n\n\
-                     You plan and coordinate coding tasks by dispatching worker threads. \
-                     Each thread gets its own context and can read, write, edit files and \
-                     run commands. Threads return a summary (episode) of what they did.\n\n\
-                     Strategy:\n\
-                     - Analyze before implementing: dispatch threads to read and understand code first\n\
-                     - Analysis threads can run in parallel (multiple threads in one turn)\n\
-                     - Implementation threads should run one at a time to avoid file conflicts\n\
-                     - Use episodes from analysis threads as context for implementation threads\n\
-                     - Verify after implementing: dispatch a thread to run tests or check results\n\n\
-                     You MUST use threads for all coding work. Do not attempt to read, write, \
-                     or edit files yourself — you do not have those tools. Your job is to \
-                     think strategically and delegate tactically.",
+                     You coordinate work through named persistent threads.\n\
+                     - A thread reuses its own retained history across dispatches\n\
+                     - Referenced source threads contribute only their latest retained episodes\n\
+                     - Threads return episode text documents\n\n\
+                     Your tools:\n\
+                     - thread(name, action, threads?)\n\
+                     - threads()\n\
+                     - thread_read(name)\n\
+                     - thread_delete(name)\n\
+                     - compact(name)\n\n\
+                     You must use threads for all coding work. You cannot read, write, or edit files directly.",
                     cwd
                 ),
-                vec![tools::thread_definition()],
+                tools::orchestrator_tool_definitions(),
             ),
         };
 
-        let messages = vec![Message::System { content: system_prompt }];
+        let mut messages = vec![Message::System {
+            content: system_prompt,
+        }];
+        messages.extend(config.initial_messages);
 
         Self {
             client,
             max_iterations,
-            max_context_tokens,
             messages,
             tool_defs,
-            last_token_count: 0,
+            tool_runtime: ToolRuntime {
+                store_path: config.store_path,
+                session_id: config.session_id,
+                active_threads: Arc::new(Mutex::new(HashSet::new())),
+            },
         }
+    }
+
+    pub fn default(client: OpenAiClient) -> Self {
+        Self::with_config(
+            client,
+            AgentConfig {
+                mode: AgentMode::Worker,
+                store_path: crate::store::default_store_path(),
+                session_id: None,
+                initial_messages: Vec::new(),
+            },
+        )
     }
 
     pub async fn send(&mut self, prompt: &str) -> Result<String> {
@@ -88,21 +113,10 @@ impl Agent {
         });
 
         for iteration in 0..self.max_iterations {
-            let threshold = (self.max_context_tokens as f64 * 0.75) as usize;
-            if self.last_token_count > threshold {
-                eprintln!("[context] {} tokens ({}% of limit), summarizing...",
-                    self.last_token_count, self.last_token_count * 100 / self.max_context_tokens.max(1));
-                self.messages = summarize_context(&self.client, &self.messages).await?;
-            }
-
             let response = self
                 .client
                 .chat(self.messages.clone(), self.tool_defs.clone())
                 .await?;
-
-            if let Some(ref usage) = response.usage {
-                self.last_token_count = usage.total_tokens.unwrap_or(0) as usize;
-            }
 
             let choice = response
                 .choices
@@ -140,7 +154,9 @@ impl Agent {
                 tool_calls.len()
             );
 
-            let results = execute_tools_parallel(tool_calls).await;
+            let results =
+                execute_tools_parallel(tool_calls, self.tool_runtime.clone(), self.client.clone())
+                    .await;
             for (tool_call_id, tool_name, result) in results {
                 eprintln!("[result] {} => {}", tool_name, first_line(&result.content));
                 self.messages.push(Message::Tool {
@@ -154,13 +170,19 @@ impl Agent {
     }
 }
 
-async fn execute_tools_parallel(tool_calls: Vec<ToolCall>) -> Vec<(String, String, ToolResult)> {
+async fn execute_tools_parallel(
+    tool_calls: Vec<ToolCall>,
+    runtime: ToolRuntime,
+    client: OpenAiClient,
+) -> Vec<(String, String, ToolResult)> {
     let mut join_set: JoinSet<(usize, String, String, ToolResult)> = JoinSet::new();
 
     for (index, tool_call) in tool_calls.into_iter().enumerate() {
         let id = tool_call.id;
         let name = tool_call.function.name;
         let args_str = tool_call.function.arguments;
+        let runtime = runtime.clone();
+        let client = client.clone();
         eprintln!("[tool] {}({})", name, preview(&args_str, 120));
 
         join_set.spawn(async move {
@@ -182,7 +204,7 @@ async fn execute_tools_parallel(tool_calls: Vec<ToolCall>) -> Vec<(String, Strin
                 }
             };
 
-            let result = tools::execute_tool(&name, args).await;
+            let result = tools::execute_tool(&name, args, &runtime, &client).await;
             (index, id, name, result)
         });
     }
@@ -210,35 +232,6 @@ async fn execute_tools_parallel(tool_calls: Vec<ToolCall>) -> Vec<(String, Strin
         .collect()
 }
 
-async fn summarize_context(client: &OpenAiClient, messages: &[Message]) -> Result<Vec<Message>> {
-    if messages.len() <= 6 {
-        return Ok(messages.to_vec());
-    }
-
-    let system = messages.first().cloned();
-    let last_four: Vec<Message> = messages
-        .iter()
-        .rev()
-        .take(4)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let to_summarize = messages[1..messages.len().saturating_sub(4)].to_vec();
-    let summary = client.summarize(to_summarize).await?;
-
-    let mut new_messages = Vec::new();
-    if let Some(s) = system {
-        new_messages.push(s);
-    }
-    new_messages.push(Message::User {
-        content: format!("Previous context summary: {}", summary),
-    });
-    new_messages.extend(last_four);
-    Ok(new_messages)
-}
-
 fn preview(value: &str, max_len: usize) -> String {
     let sanitized = value.replace('\n', "\\n");
     if sanitized.len() <= max_len {
@@ -259,7 +252,7 @@ mod tests {
     #[test]
     fn test_agent_creation() {
         let client = OpenAiClient::new_for_test();
-        let agent = Agent::new(client);
+        let agent = Agent::default(client);
         assert!(!agent.messages.is_empty());
         assert!(!agent.tool_defs.is_empty());
     }

@@ -5,6 +5,7 @@ use tokio::time::sleep;
 
 use crate::types::{ChatRequest, ChatResponse, Message, ToolDefinition};
 
+#[derive(Clone)]
 pub struct OpenAiClient {
     client: Client,
     base_url: String,
@@ -18,8 +19,8 @@ impl OpenAiClient {
             .map_err(|_| anyhow!("OPENAI_API_KEY environment variable is not set"))?;
         let base_url = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-        let model = std::env::var("OPENAI_MODEL")
-            .unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
+        let model =
+            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
         Ok(Self {
             client: Client::new(),
             base_url,
@@ -65,8 +66,14 @@ impl OpenAiClient {
                 .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
 
             if status.is_success() {
-                return serde_json::from_str::<ChatResponse>(&body)
-                    .map_err(|e| anyhow!("Failed to parse response from {}: {}\nBody: {}", url, e, &body[..body.len().min(500)]));
+                return serde_json::from_str::<ChatResponse>(&body).map_err(|e| {
+                    anyhow!(
+                        "Failed to parse response from {}: {}\nBody: {}",
+                        url,
+                        e,
+                        &body[..body.len().min(500)]
+                    )
+                });
             }
 
             if status.as_u16() == 429 || status.is_server_error() {
@@ -89,16 +96,20 @@ impl OpenAiClient {
         Err(last_error)
     }
 
-    pub async fn summarize(&self, messages: Vec<Message>) -> Result<String> {
+    pub async fn complete_text(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         let url = format!("{}/chat/completions", self.base_url);
-        let mut all_messages = vec![Message::System {
-            content: "Summarize the conversation so far in detail, preserving all technical context, file paths, decisions made, and current task state. Be thorough but concise.".to_string(),
-        }];
-        all_messages.extend(messages);
+        let messages = vec![
+            Message::System {
+                content: system_prompt.to_string(),
+            },
+            Message::User {
+                content: user_prompt.to_string(),
+            },
+        ];
 
         let request = ChatRequest {
             model: self.model.clone(),
-            messages: all_messages,
+            messages,
             tools: vec![],
             temperature: 0.0,
         };
@@ -111,21 +122,31 @@ impl OpenAiClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| anyhow!("HTTP request failed: {}", e))?;
+            .map_err(|e| anyhow!("HTTP request failed for {}: {}", url, e))?;
 
         let status = response.status();
         let body = response.text().await?;
         if !status.is_success() {
-            return Err(anyhow!("HTTP {} from summarize: {}", status.as_u16(), &body[..body.len().min(500)]));
+            return Err(anyhow!(
+                "HTTP {} from {}: {}",
+                status.as_u16(),
+                url,
+                &body[..body.len().min(500)]
+            ));
         }
 
         let parsed: ChatResponse = serde_json::from_str(&body)
-            .map_err(|e| anyhow!("Parse error in summarize: {}", e))?;
-        let choice = parsed.choices.into_iter().next()
-            .ok_or_else(|| anyhow!("No choices in summarize response"))?;
+            .map_err(|e| anyhow!("Failed to parse response from {}: {}", url, e))?;
+        let choice = parsed
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No choices in text completion response"))?;
         let content = match choice.message {
-            crate::types::ResponseMessage { content: Some(c), .. } => c,
-            _ => return Err(anyhow!("Summarize returned no text content")),
+            crate::types::ResponseMessage {
+                content: Some(c), ..
+            } => c,
+            _ => return Err(anyhow!("Text completion returned no text content")),
         };
         Ok(content)
     }
@@ -155,11 +176,16 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
 
         let original = std::env::var("OPENAI_API_KEY").ok();
-        unsafe { std::env::remove_var("OPENAI_API_KEY"); }
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
 
         let result = OpenAiClient::from_env();
         assert!(result.is_err(), "Expected error when API key missing");
-        let err_msg = result.err().expect("Expected missing-key error").to_string();
+        let err_msg = result
+            .err()
+            .expect("Expected missing-key error")
+            .to_string();
         assert!(
             err_msg.contains("OPENAI_API_KEY"),
             "Error should mention OPENAI_API_KEY, got: {}",
@@ -167,7 +193,9 @@ mod tests {
         );
 
         if let Some(key) = original {
-            unsafe { std::env::set_var("OPENAI_API_KEY", key); }
+            unsafe {
+                std::env::set_var("OPENAI_API_KEY", key);
+            }
         }
     }
 }

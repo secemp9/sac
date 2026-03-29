@@ -24,11 +24,7 @@ pub async fn execute(args: Value) -> ToolResult {
 }
 
 async fn run_command(command: &str) -> ToolResult {
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .await;
+    let output = Command::new("bash").arg("-c").arg(command).output().await;
 
     match output {
         Err(e) => ToolResult {

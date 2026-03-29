@@ -86,6 +86,10 @@ mod tests {
     async fn test_read_existing_file() {
         let result = execute(json!({ "path": "Cargo.toml" })).await;
         assert!(!result.is_error, "Got error: {}", result.content);
-        assert!(result.content.contains("[package]"), "Got: {}", result.content);
+        assert!(
+            result.content.contains("[workspace]") || result.content.contains("[package]"),
+            "Got: {}",
+            result.content
+        );
     }
 }

@@ -105,7 +105,11 @@ mod tests {
         }))
         .await;
         assert!(result.is_error);
-        assert!(result.content.contains("not found"), "Got: {}", result.content);
+        assert!(
+            result.content.contains("not found"),
+            "Got: {}",
+            result.content
+        );
         let _ = tokio::fs::remove_file(&path).await;
     }
 
@@ -119,7 +123,11 @@ mod tests {
         }))
         .await;
         assert!(result.is_error);
-        assert!(result.content.contains("3 times"), "Got: {}", result.content);
+        assert!(
+            result.content.contains("3 times"),
+            "Got: {}",
+            result.content
+        );
         let _ = tokio::fs::remove_file(&path).await;
     }
 }

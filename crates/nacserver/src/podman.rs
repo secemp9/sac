@@ -1,12 +1,18 @@
-use std::path::Path;
 use anyhow::{anyhow, Result};
+use std::path::Path;
 use tokio::process::Command;
 
 pub async fn check_available() -> Result<()> {
-    let output = Command::new("podman").arg("--version").output().await
+    let output = Command::new("podman")
+        .arg("--version")
+        .output()
+        .await
         .map_err(|_| anyhow!("podman not found — install podman to use nacserver"))?;
     if !output.status.success() {
-        return Err(anyhow!("podman not working: {}", String::from_utf8_lossy(&output.stderr)));
+        return Err(anyhow!(
+            "podman not working: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
     Ok(())
 }
@@ -25,10 +31,14 @@ pub async fn run_ephemeral(
     prompt: &str,
 ) -> Result<RunResult> {
     let mut args = vec![
-        "run".to_string(), "--rm".to_string(),
-        "--name".to_string(), container_name.to_string(),
-        "-v".to_string(), format!("{}:/workspace", workspace.display()),
-        "-w".to_string(), "/workspace".to_string(),
+        "run".to_string(),
+        "--rm".to_string(),
+        "--name".to_string(),
+        container_name.to_string(),
+        "-v".to_string(),
+        format!("{}:/workspace", workspace.display()),
+        "-w".to_string(),
+        "/workspace".to_string(),
     ];
     for (k, v) in env_vars {
         args.push("-e".to_string());
@@ -36,7 +46,6 @@ pub async fn run_ephemeral(
     }
     args.push(image.to_string());
     args.push("nac".to_string());
-    args.push("--orchestrator".to_string());
     args.push("--single".to_string());
     args.push(prompt.to_string());
 

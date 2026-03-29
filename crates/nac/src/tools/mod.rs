@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -14,13 +18,20 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+#[derive(Clone)]
+pub struct ToolRuntime {
+    pub store_path: PathBuf,
+    pub session_id: Option<String>,
+    pub active_threads: Arc<Mutex<HashSet<String>>>,
+}
+
 static WRITE_LOCK: Mutex<()> = Mutex::const_new(());
 
 pub async fn acquire_write_lock() -> tokio::sync::MutexGuard<'static, ()> {
     WRITE_LOCK.lock().await
 }
 
-pub fn tool_definitions() -> Vec<ToolDefinition> {
+pub fn worker_tool_definitions() -> Vec<ToolDefinition> {
     use serde_json::json;
 
     vec![
@@ -77,20 +88,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
-pub fn thread_definition() -> ToolDefinition {
-    use serde_json::json;
-    def(
-        "thread",
-        "Spawn a worker thread to execute a bounded coding task. The worker gets its own context and tools (read, write, edit, bash). Returns a summary of what it did. Use for: analyzing code, implementing changes, running tests. Pass context from prior threads to chain work.",
-        json!({
-            "type": "object",
-            "properties": {
-                "prompt": { "type": "string", "description": "The task for the worker to complete" },
-                "context": { "type": "string", "description": "Episode from a prior thread to provide as input context (optional)" }
-            },
-            "required": ["prompt"]
-        }),
-    )
+pub fn orchestrator_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        thread::dispatch_definition(),
+        thread::threads_definition(),
+        thread::thread_read_definition(),
+        thread::thread_delete_definition(),
+        thread::compact_definition(),
+    ]
 }
 
 fn def(name: &str, description: &str, parameters: Value) -> ToolDefinition {
@@ -114,13 +119,48 @@ pub fn require_str(args: &Value, key: &str) -> Result<String, ToolResult> {
         })
 }
 
-pub async fn execute_tool(name: &str, args: Value) -> ToolResult {
+pub fn require_string_array(args: &Value, key: &str) -> Result<Vec<String>, ToolResult> {
+    let Some(value) = args.get(key) else {
+        return Ok(Vec::new());
+    };
+
+    let Some(items) = value.as_array() else {
+        return Err(ToolResult {
+            content: format!("Error: '{}' must be an array of strings", key),
+            is_error: true,
+        });
+    };
+
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(value) = item.as_str() else {
+            return Err(ToolResult {
+                content: format!("Error: '{}' must be an array of strings", key),
+                is_error: true,
+            });
+        };
+        out.push(value.to_string());
+    }
+
+    Ok(out)
+}
+
+pub async fn execute_tool(
+    name: &str,
+    args: Value,
+    runtime: &ToolRuntime,
+    client: &crate::api::OpenAiClient,
+) -> ToolResult {
     match name {
         "read" => read::execute(args).await,
         "write" => write::execute(args).await,
         "edit" => edit::execute(args).await,
         "bash" => bash::execute(args).await,
-        "thread" => thread::execute(args).await,
+        "thread" => thread::execute_dispatch(args, runtime).await,
+        "threads" => thread::execute_threads(runtime).await,
+        "thread_read" => thread::execute_thread_read(args, runtime).await,
+        "thread_delete" => thread::execute_thread_delete(args, runtime).await,
+        "compact" => thread::execute_compact(args, runtime, client).await,
         unknown => ToolResult {
             content: format!("Error: unknown tool '{}'", unknown),
             is_error: true,

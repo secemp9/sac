@@ -1,66 +1,491 @@
+use std::process::Stdio;
 use std::time::Duration;
+
 use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::tools::{require_str, ToolResult};
+use crate::api::OpenAiClient;
+use crate::store;
+use crate::tools::{require_str, require_string_array, ToolResult, ToolRuntime};
+use crate::types::ToolDefinition;
 
-pub async fn execute(args: Value) -> ToolResult {
-    let prompt = match require_str(&args, "prompt") {
+pub fn dispatch_definition() -> ToolDefinition {
+    use serde_json::json;
+    def(
+        "thread",
+        "Dispatch a named worker thread. The worker reuses its own retained history and can pull the latest retained episode from other named threads.",
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Thread name. Creates if new, reuses if existing." },
+                "action": { "type": "string", "description": "Task for the worker." },
+                "threads": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Other thread names whose latest retained episodes should be loaded."
+                }
+            },
+            "required": ["name", "action"]
+        }),
+    )
+}
+
+pub fn threads_definition() -> ToolDefinition {
+    use serde_json::json;
+    def(
+        "threads",
+        "List active threads in the current orchestrator session.",
+        json!({
+            "type": "object",
+            "properties": {}
+        }),
+    )
+}
+
+pub fn thread_read_definition() -> ToolDefinition {
+    use serde_json::json;
+    def(
+        "thread_read",
+        "Read the full retained episode history for one thread.",
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Thread name." }
+            },
+            "required": ["name"]
+        }),
+    )
+}
+
+pub fn thread_delete_definition() -> ToolDefinition {
+    use serde_json::json;
+    def(
+        "thread_delete",
+        "Delete one thread and all its retained episodes.",
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Thread name." }
+            },
+            "required": ["name"]
+        }),
+    )
+}
+
+pub fn compact_definition() -> ToolDefinition {
+    use serde_json::json;
+    def(
+        "compact",
+        "Compact one thread into a single retained episode.",
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Thread name." }
+            },
+            "required": ["name"]
+        }),
+    )
+}
+
+pub async fn execute_dispatch(args: Value, runtime: &ToolRuntime) -> ToolResult {
+    let thread_name = match require_str(&args, "name") {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let context = args.get("context").and_then(|v| v.as_str()).unwrap_or("");
-
-    let full_prompt = if context.is_empty() {
-        prompt
-    } else {
-        format!("Context from previous work:\n{}\n\nTask: {}", context, prompt)
+    let action = match require_str(&args, "action") {
+        Ok(s) => s,
+        Err(e) => return e,
     };
+    let source_threads = match require_string_array(&args, "threads") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = match require_session(runtime) {
+        Ok(s) => s.to_string(),
+        Err(e) => return e,
+    };
+
+    if !mark_thread_active(runtime, &thread_name).await {
+        return ToolResult {
+            content: format!(
+                "Thread '{}' is already running; retry after the current dispatch completes.",
+                thread_name
+            ),
+            is_error: true,
+        };
+    }
 
     let timeout_secs: u64 = std::env::var("AGENT_THREAD_TIMEOUT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(300);
 
-    let result = timeout(
-        Duration::from_secs(timeout_secs),
-        Command::new("nac")
-            .args(["--single", &full_prompt])
-            .output(),
+    let result = run_worker(
+        runtime,
+        &session_id,
+        &thread_name,
+        &action,
+        &source_threads,
+        timeout_secs,
     )
     .await;
+    unmark_thread_active(runtime, &thread_name).await;
 
     match result {
-        Err(_) => ToolResult {
-            content: format!("Thread timed out after {}s", timeout_secs),
+        Err(e) => ToolResult {
+            content: format!("Failed to spawn thread '{}': {}", thread_name, e),
             is_error: true,
         },
-        Ok(Err(e)) => ToolResult {
-            content: format!("Failed to spawn thread: {}", e),
+        Ok(run) if run.timed_out => ToolResult {
+            content: format!("Thread '{}' timed out after {}s", thread_name, timeout_secs),
             is_error: true,
         },
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-            if !stderr.is_empty() {
-                for line in stderr.lines() {
-                    eprintln!("  [thread] {}", line);
-                }
-            }
-
-            if !output.status.success() && stdout.trim().is_empty() {
-                ToolResult {
-                    content: format!("Thread failed (exit {}):\n{}", output.status.code().unwrap_or(-1), stderr),
-                    is_error: true,
-                }
+        Ok(run) if run.exit_code != 0 => {
+            let details = if !run.stderr.trim().is_empty() {
+                run.stderr.trim().to_string()
+            } else if !run.stdout.trim().is_empty() {
+                run.stdout.trim().to_string()
             } else {
-                ToolResult {
-                    content: stdout,
-                    is_error: false,
-                }
+                "no output".to_string()
+            };
+            ToolResult {
+                content: format!(
+                    "Thread '{}' failed (exit {}):\n{}",
+                    thread_name, run.exit_code, details
+                ),
+                is_error: true,
             }
         }
+        Ok(run) => ToolResult {
+            content: run.stdout.trim().to_string(),
+            is_error: false,
+        },
     }
+}
+
+pub async fn execute_threads(runtime: &ToolRuntime) -> ToolResult {
+    let session_id = match require_session(runtime) {
+        Ok(s) => s.to_string(),
+        Err(e) => return e,
+    };
+
+    let threads = match store::list_threads(&runtime.store_path, &session_id) {
+        Ok(threads) => threads,
+        Err(error) => {
+            return ToolResult {
+                content: format!("Error listing threads: {}", error),
+                is_error: true,
+            }
+        }
+    };
+
+    if threads.is_empty() {
+        return ToolResult {
+            content: "No active threads in this session.".to_string(),
+            is_error: false,
+        };
+    }
+
+    let mut output = String::from("Active threads:");
+    for thread in threads {
+        output.push_str(&format!(
+            "\n- {} | {} episodes | {} context tokens | created {} | updated {}",
+            thread.name,
+            thread.episode_count,
+            thread.context_tokens,
+            thread.created_at,
+            thread.updated_at
+        ));
+    }
+
+    ToolResult {
+        content: output,
+        is_error: false,
+    }
+}
+
+pub async fn execute_thread_read(args: Value, runtime: &ToolRuntime) -> ToolResult {
+    let thread_name = match require_str(&args, "name") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let session_id = match require_session(runtime) {
+        Ok(s) => s.to_string(),
+        Err(e) => return e,
+    };
+
+    match store::thread_read(&runtime.store_path, &session_id, &thread_name) {
+        Ok(episodes) => ToolResult {
+            content: store::render_thread_document(&thread_name, &episodes),
+            is_error: false,
+        },
+        Err(error) => ToolResult {
+            content: format!("Error reading thread '{}': {}", thread_name, error),
+            is_error: true,
+        },
+    }
+}
+
+pub async fn execute_thread_delete(args: Value, runtime: &ToolRuntime) -> ToolResult {
+    let thread_name = match require_str(&args, "name") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let session_id = match require_session(runtime) {
+        Ok(s) => s.to_string(),
+        Err(e) => return e,
+    };
+
+    if is_thread_active(runtime, &thread_name).await {
+        return ToolResult {
+            content: format!(
+                "Thread '{}' is currently running; wait for it to finish before deleting it.",
+                thread_name
+            ),
+            is_error: true,
+        };
+    }
+
+    match store::delete_thread(&runtime.store_path, &session_id, &thread_name) {
+        Ok(true) => ToolResult {
+            content: format!(
+                "Deleted thread '{}' and its retained episodes.",
+                thread_name
+            ),
+            is_error: false,
+        },
+        Ok(false) => ToolResult {
+            content: format!("Thread '{}' does not exist in this session.", thread_name),
+            is_error: true,
+        },
+        Err(error) => ToolResult {
+            content: format!("Error deleting thread '{}': {}", thread_name, error),
+            is_error: true,
+        },
+    }
+}
+
+pub async fn execute_compact(
+    args: Value,
+    runtime: &ToolRuntime,
+    client: &OpenAiClient,
+) -> ToolResult {
+    let thread_name = match require_str(&args, "name") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let session_id = match require_session(runtime) {
+        Ok(s) => s.to_string(),
+        Err(e) => return e,
+    };
+
+    if is_thread_active(runtime, &thread_name).await {
+        return ToolResult {
+            content: format!(
+                "Thread '{}' is currently running; wait for it to finish before compacting it.",
+                thread_name
+            ),
+            is_error: true,
+        };
+    }
+
+    match compact_thread(runtime, client, &session_id, &thread_name).await {
+        Ok(message) => ToolResult {
+            content: message,
+            is_error: false,
+        },
+        Err(error) => ToolResult {
+            content: format!("Error compacting thread '{}': {}", thread_name, error),
+            is_error: true,
+        },
+    }
+}
+
+pub async fn auto_compact_if_needed(
+    runtime: &ToolRuntime,
+    client: &OpenAiClient,
+    session_id: &str,
+    thread_name: &str,
+) -> Result<(), anyhow::Error> {
+    let threshold = (max_context_tokens() as f64 * 0.75) as i64;
+    let Some(context_tokens) =
+        store::thread_context_tokens(&runtime.store_path, session_id, thread_name)?
+    else {
+        return Ok(());
+    };
+
+    if context_tokens <= threshold {
+        return Ok(());
+    }
+
+    compact_thread(runtime, client, session_id, thread_name).await?;
+    Ok(())
+}
+
+async fn compact_thread(
+    runtime: &ToolRuntime,
+    client: &OpenAiClient,
+    session_id: &str,
+    thread_name: &str,
+) -> Result<String, anyhow::Error> {
+    let episodes = store::thread_read(&runtime.store_path, session_id, thread_name)?;
+    if episodes.is_empty() {
+        return Err(anyhow::anyhow!(
+            "thread '{}' has no retained episodes",
+            thread_name
+        ));
+    }
+    if episodes.len() == 1 {
+        return Ok(format!(
+            "Thread '{}' already has a single retained episode; compaction skipped.",
+            thread_name
+        ));
+    }
+
+    let source = store::render_thread_document(thread_name, &episodes);
+    let compacted = client
+        .complete_text(
+            "Compress this retained thread history into one episode. Preserve file paths, decisions, current state, verification results, and unresolved issues. Keep it concise, but do not drop important implementation context.",
+            &source,
+        )
+        .await?;
+
+    let context_tokens =
+        store::compact_thread(&runtime.store_path, session_id, thread_name, &compacted)?;
+    Ok(format!(
+        "Compacted thread '{}' to 1 retained episode ({} context tokens).",
+        thread_name, context_tokens
+    ))
+}
+
+fn def(name: &str, description: &str, parameters: serde_json::Value) -> ToolDefinition {
+    ToolDefinition {
+        def_type: "function".to_string(),
+        function: crate::types::FunctionDef {
+            name: name.to_string(),
+            description: description.to_string(),
+            parameters,
+        },
+    }
+}
+
+fn require_session(runtime: &ToolRuntime) -> Result<&str, ToolResult> {
+    runtime.session_id.as_deref().ok_or_else(|| ToolResult {
+        content: "Error: thread tools require an active session".to_string(),
+        is_error: true,
+    })
+}
+
+async fn mark_thread_active(runtime: &ToolRuntime, thread_name: &str) -> bool {
+    let mut active = runtime.active_threads.lock().await;
+    if active.contains(thread_name) {
+        false
+    } else {
+        active.insert(thread_name.to_string());
+        true
+    }
+}
+
+async fn unmark_thread_active(runtime: &ToolRuntime, thread_name: &str) {
+    runtime.active_threads.lock().await.remove(thread_name);
+}
+
+async fn is_thread_active(runtime: &ToolRuntime, thread_name: &str) -> bool {
+    runtime.active_threads.lock().await.contains(thread_name)
+}
+
+struct WorkerRun {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    timed_out: bool,
+}
+
+async fn run_worker(
+    runtime: &ToolRuntime,
+    session_id: &str,
+    thread_name: &str,
+    action: &str,
+    source_threads: &[String],
+    timeout_secs: u64,
+) -> std::io::Result<WorkerRun> {
+    let executable = std::env::current_exe()?;
+    let mut command = Command::new(executable);
+    command
+        .arg("--worker")
+        .arg("--session-id")
+        .arg(session_id)
+        .arg("--thread-name")
+        .arg(thread_name)
+        .arg("--action")
+        .arg(action)
+        .arg("--store-path")
+        .arg(runtime.store_path.as_os_str())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    for source_thread in source_threads {
+        command.arg("--source-thread").arg(source_thread);
+    }
+
+    let mut child = command.spawn()?;
+
+    let stderr = child.stderr.take().unwrap();
+    let stderr_handle = tokio::spawn(async move {
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        let mut output = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!("  [thread] {}", line);
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&line);
+        }
+        output
+    });
+
+    let stdout = child.stdout.take().unwrap();
+    let stdout_handle = tokio::spawn(async move {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut output = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&line);
+        }
+        output
+    });
+
+    let status = timeout(Duration::from_secs(timeout_secs), child.wait()).await;
+    let timed_out = status.is_err();
+    if timed_out {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+
+    let stderr = stderr_handle.await.unwrap_or_default();
+    let stdout = stdout_handle.await.unwrap_or_default();
+    let exit_code = match status {
+        Ok(wait_result) => wait_result?.code().unwrap_or(-1),
+        Err(_) => -1,
+    };
+
+    Ok(WorkerRun {
+        stdout,
+        stderr,
+        exit_code,
+        timed_out,
+    })
+}
+
+fn max_context_tokens() -> usize {
+    std::env::var("AGENT_MAX_CONTEXT_TOKENS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(120_000)
 }

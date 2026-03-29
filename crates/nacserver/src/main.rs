@@ -1,21 +1,69 @@
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::time::Instant;
 use anyhow::Result;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get},
     Json, Router,
 };
 use serde::Deserialize;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Instant;
 use tower_http::cors::CorsLayer;
 
 mod podman;
 mod task;
 
 use task::{Task, TaskStatus, TaskStore};
+
+fn now_utc() -> String {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = d.as_secs();
+    let (days, rem) = (secs / 86400, secs % 86400);
+    let (h, rem) = (rem / 3600, rem % 3600);
+    let (m, s) = (rem / 60, rem % 60);
+    let (mut y, mut mo, mut day) = (1970i64, 1u32, 1u32);
+    let mut remaining = days as i64;
+    loop {
+        let yd = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining < yd {
+            break;
+        }
+        remaining -= yd;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let mdays = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    for md in mdays {
+        if remaining < md as i64 {
+            break;
+        }
+        remaining -= md as i64;
+        mo += 1;
+    }
+    day += remaining as u32;
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, day, h, m, s)
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -33,8 +81,12 @@ async fn main() -> Result<()> {
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
     let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_default();
     let model = std::env::var("OPENAI_MODEL").unwrap_or_default();
-    let default_image = std::env::var("NAC_DEFAULT_IMAGE").unwrap_or_else(|_| "nac:base".to_string());
-    let port: u16 = std::env::var("NAC_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
+    let default_image =
+        std::env::var("NAC_DEFAULT_IMAGE").unwrap_or_else(|_| "nac:base".to_string());
+    let port: u16 = std::env::var("NAC_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
 
     let state = AppState {
         tasks: task::open_store()?,
@@ -46,7 +98,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/health", get(health))
-        .route("/tasks", post(create_task))
+        .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}", delete(kill_task))
         .layer(CorsLayer::permissive())
@@ -100,11 +152,19 @@ async fn create_task(
         output: None,
         branch: Some(task_branch.clone()),
         parent_task_id: req.parent_task_id.clone(),
+        created_at: now_utc(),
+        completed_at: None,
     };
-    task::insert(&state.tasks, &new_task).await
+    task::insert(&state.tasks, &new_task)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {}", e)))?;
 
-    eprintln!("[task] {} created | image={} | prompt={}", &task_id[..8], image, &req.prompt[..req.prompt.len().min(80)]);
+    eprintln!(
+        "[task] {} created | image={} | prompt={}",
+        &task_id[..8],
+        image,
+        &req.prompt[..req.prompt.len().min(80)]
+    );
 
     let task_state = state.clone();
     let repo_url = req.repo_url.clone();
@@ -128,12 +188,24 @@ async fn create_task(
         let elapsed = start.elapsed().as_secs();
         match result {
             Ok((output, branch)) => {
-                let _ = task::update_completed(&task_state.tasks, &spawn_task_id, &output, branch.as_deref()).await;
+                let _ = task::update_completed(
+                    &task_state.tasks,
+                    &spawn_task_id,
+                    &output,
+                    branch.as_deref(),
+                )
+                .await;
                 eprintln!("[task] {} completed | {}s", &spawn_task_id[..8], elapsed);
             }
             Err(e) => {
-                let _ = task::update_failed(&task_state.tasks, &spawn_task_id, &e.to_string()).await;
-                eprintln!("[task] {} failed | {}s | {}", &spawn_task_id[..8], elapsed, e);
+                let _ =
+                    task::update_failed(&task_state.tasks, &spawn_task_id, &e.to_string()).await;
+                eprintln!(
+                    "[task] {} failed | {}s | {}",
+                    &spawn_task_id[..8],
+                    elapsed,
+                    e
+                );
             }
         }
     });
@@ -155,13 +227,20 @@ struct TaskParams<'a> {
 }
 
 async fn run_task(state: &AppState, p: &TaskParams<'_>) -> Result<(String, Option<String>)> {
-    let workspace = std::env::temp_dir().join(format!("nac-task-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+    let workspace = std::env::temp_dir().join(format!(
+        "nac-task-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    ));
     std::fs::create_dir_all(&workspace)?;
 
     let _cleanup = WorkspaceCleanup(workspace.clone());
 
     if let Some(url) = p.repo_url {
-        let checkout_branch = if p.parent_task_id.is_some() { p.task_branch } else { p.source_branch };
+        let checkout_branch = if p.parent_task_id.is_some() {
+            p.task_branch
+        } else {
+            p.source_branch
+        };
         git_clone(&workspace, url, checkout_branch).await?;
     }
 
@@ -173,10 +252,16 @@ async fn run_task(state: &AppState, p: &TaskParams<'_>) -> Result<(String, Optio
         env_vars.push(("OPENAI_MODEL", &state.model));
     }
 
-    let result = podman::run_ephemeral(p.container_name, p.image, &workspace, &env_vars, p.prompt).await?;
+    let result =
+        podman::run_ephemeral(p.container_name, p.image, &workspace, &env_vars, p.prompt).await?;
 
     let branch = if p.repo_url.is_some() {
-        git_push_changes(&workspace, p.task_branch, &p.prompt[..p.prompt.len().min(72)]).await?
+        git_push_changes(
+            &workspace,
+            p.task_branch,
+            &p.prompt[..p.prompt.len().min(72)],
+        )
+        .await?
     } else {
         None
     };
@@ -202,13 +287,20 @@ async fn git_clone(workspace: &PathBuf, url: &str, branch: &str) -> Result<()> {
             .output()
             .await?;
         if !output.status.success() {
-            anyhow::bail!("git clone failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "git clone failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
     Ok(())
 }
 
-async fn git_push_changes(workspace: &PathBuf, branch: &str, message: &str) -> Result<Option<String>> {
+async fn git_push_changes(
+    workspace: &PathBuf,
+    branch: &str,
+    message: &str,
+) -> Result<Option<String>> {
     let status = tokio::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(workspace)
@@ -252,29 +344,67 @@ impl Drop for WorkspaceCleanup {
     }
 }
 
-async fn get_task(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let t = task::get(&state.tasks, &id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {}", e)))?
-        .ok_or((StatusCode::NOT_FOUND, format!("task '{}' not found", id)))?;
-
-    Ok(Json(serde_json::json!({
+fn task_to_json(t: &Task) -> serde_json::Value {
+    serde_json::json!({
         "task_id": t.id,
         "status": t.status,
         "prompt": t.prompt,
         "output": t.output,
         "branch": t.branch,
         "parent_task_id": t.parent_task_id,
-    })))
+        "created_at": t.created_at,
+        "completed_at": t.completed_at,
+    })
+}
+
+async fn list_tasks(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tasks = task::list(&state.tasks)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {}", e)))?;
+
+    let items: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|t| {
+            let prompt_preview = if t.prompt.len() > 200 {
+                format!("{}...", &t.prompt[..200])
+            } else {
+                t.prompt.clone()
+            };
+            serde_json::json!({
+                "task_id": t.id,
+                "status": t.status,
+                "prompt": prompt_preview,
+                "branch": t.branch,
+                "parent_task_id": t.parent_task_id,
+                "created_at": t.created_at,
+                "completed_at": t.completed_at,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({"tasks": items})))
+}
+
+async fn get_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = task::get(&state.tasks, &id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {}", e)))?
+        .ok_or((StatusCode::NOT_FOUND, format!("task '{}' not found", id)))?;
+
+    Ok(Json(task_to_json(&t)))
 }
 
 async fn kill_task(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let t = task::get(&state.tasks, &id).await
+    let t = task::get(&state.tasks, &id)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {}", e)))?
         .ok_or((StatusCode::NOT_FOUND, format!("task '{}' not found", id)))?;
 
