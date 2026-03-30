@@ -300,9 +300,19 @@ async fn compact_thread(
             &source,
         )
         .await?;
+    let compacted_tokens = compacted
+        .usage
+        .completion_tokens
+        .ok_or_else(|| anyhow::anyhow!("compaction response did not include completion_tokens"))?
+        as i64;
 
-    let context_tokens =
-        store::compact_thread(&runtime.store_path, session_id, thread_name, &compacted)?;
+    let context_tokens = store::compact_thread(
+        &runtime.store_path,
+        session_id,
+        thread_name,
+        &compacted.content,
+        compacted_tokens,
+    )?;
     Ok(format!(
         "Compacted thread '{}' to 1 retained episode ({} context tokens).",
         thread_name, context_tokens

@@ -44,6 +44,7 @@ pub fn append_episode(
     thread_name: &str,
     action: &str,
     content: &str,
+    episode_tokens: i64,
 ) -> Result<i64> {
     let mut conn = open_connection(path)?;
     let tx = conn.transaction()?;
@@ -55,8 +56,12 @@ pub fn append_episode(
         params![thread_name, session_id, action, content, now_utc()],
     )?;
 
-    let episodes = load_thread_episodes_in_tx(&tx, session_id, thread_name)?;
-    let context_tokens = compute_thread_context_tokens(thread_name, &episodes);
+    let existing_context_tokens: i64 = tx.query_row(
+        "SELECT context_tokens FROM threads WHERE name = ?1 AND session_id = ?2",
+        params![thread_name, session_id],
+        |row| row.get(0),
+    )?;
+    let context_tokens = existing_context_tokens + episode_tokens;
     tx.execute(
         "UPDATE threads
          SET context_tokens = ?1, updated_at = ?2
@@ -156,6 +161,7 @@ pub fn compact_thread(
     session_id: &str,
     thread_name: &str,
     content: &str,
+    compacted_tokens: i64,
 ) -> Result<i64> {
     let mut conn = open_connection(path)?;
     let tx = conn.transaction()?;
@@ -170,18 +176,15 @@ pub fn compact_thread(
          VALUES (?1, ?2, 'compact', ?3, ?4)",
         params![thread_name, session_id, content, now_utc()],
     )?;
-
-    let episodes = load_thread_episodes_in_tx(&tx, session_id, thread_name)?;
-    let context_tokens = compute_thread_context_tokens(thread_name, &episodes);
     tx.execute(
         "UPDATE threads
          SET context_tokens = ?1, updated_at = ?2
          WHERE name = ?3 AND session_id = ?4",
-        params![context_tokens, now_utc(), thread_name, session_id],
+        params![compacted_tokens, now_utc(), thread_name, session_id],
     )?;
 
     tx.commit()?;
-    Ok(context_tokens)
+    Ok(compacted_tokens)
 }
 
 pub fn render_self_context(thread_name: &str, episodes: &[EpisodeRecord]) -> Option<String> {
@@ -275,25 +278,6 @@ fn ensure_thread_in_tx(tx: &Transaction<'_>, session_id: &str, thread_name: &str
     Ok(())
 }
 
-fn load_thread_episodes_in_tx(
-    tx: &Transaction<'_>,
-    session_id: &str,
-    thread_name: &str,
-) -> Result<Vec<EpisodeRecord>> {
-    let mut stmt = tx.prepare(
-        "SELECT id, thread_name, session_id, action, content, created_at
-         FROM episodes
-         WHERE thread_name = ?1 AND session_id = ?2
-         ORDER BY id ASC",
-    )?;
-    let mut rows = stmt.query(params![thread_name, session_id])?;
-    let mut episodes = Vec::new();
-    while let Some(row) = rows.next()? {
-        episodes.push(row_to_episode(row)?);
-    }
-    Ok(episodes)
-}
-
 fn load_thread_episodes(
     conn: &Connection,
     session_id: &str,
@@ -340,15 +324,6 @@ fn row_to_episode(row: &rusqlite::Row<'_>) -> rusqlite::Result<EpisodeRecord> {
         content: row.get(4)?,
         created_at: row.get(5)?,
     })
-}
-
-fn compute_thread_context_tokens(thread_name: &str, episodes: &[EpisodeRecord]) -> i64 {
-    let rendered = render_self_context(thread_name, episodes).unwrap_or_default();
-    estimate_tokens(&rendered)
-}
-
-fn estimate_tokens(text: &str) -> i64 {
-    ((text.chars().count() as f64) / 4.0).ceil() as i64
 }
 
 fn now_utc() -> String {
@@ -425,6 +400,7 @@ mod tests {
             "auth",
             "inspect",
             "first auth episode",
+            11,
         )
         .unwrap();
         append_episode(
@@ -433,9 +409,10 @@ mod tests {
             "auth",
             "refactor",
             "second auth episode",
+            13,
         )
         .unwrap();
-        append_episode(&store_path, session_id, "tests", "inspect", "test episode").unwrap();
+        append_episode(&store_path, session_id, "tests", "inspect", "test episode", 7).unwrap();
 
         let threads = list_threads(&store_path, session_id).unwrap();
         assert_eq!(threads.len(), 2);
@@ -461,9 +438,9 @@ mod tests {
         initialize(&store_path).unwrap();
 
         let session_id = "session-b";
-        append_episode(&store_path, session_id, "auth", "inspect", "self history").unwrap();
-        append_episode(&store_path, session_id, "tests", "scan", "old source").unwrap();
-        append_episode(&store_path, session_id, "tests", "scan", "new source").unwrap();
+        append_episode(&store_path, session_id, "auth", "inspect", "self history", 9).unwrap();
+        append_episode(&store_path, session_id, "tests", "scan", "old source", 8).unwrap();
+        append_episode(&store_path, session_id, "tests", "scan", "new source", 8).unwrap();
 
         let context =
             load_worker_context(&store_path, session_id, "auth", &["tests".to_string()]).unwrap();
@@ -487,6 +464,7 @@ mod tests {
             "impl",
             "step-1",
             "before compact 1",
+            10,
         )
         .unwrap();
         append_episode(
@@ -495,10 +473,11 @@ mod tests {
             "impl",
             "step-2",
             "before compact 2",
+            12,
         )
         .unwrap();
 
-        compact_thread(&store_path, session_id, "impl", "compacted episode").unwrap();
+        compact_thread(&store_path, session_id, "impl", "compacted episode", 6).unwrap();
         let episodes = thread_read(&store_path, session_id, "impl").unwrap();
         assert_eq!(episodes.len(), 1);
         assert_eq!(episodes[0].action, "compact");

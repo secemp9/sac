@@ -90,7 +90,10 @@ async fn run() -> Result<()> {
     if let Some(prompt) = run_config.initial_prompt {
         let response = agent.send(&prompt).await?;
         if let Some(worker) = &run_config.managed_worker {
-            commit_managed_worker(worker, &client, &response).await?;
+            let completion_tokens = agent
+                .last_completion_tokens()
+                .ok_or_else(|| anyhow::anyhow!("worker response did not include completion_tokens"))?;
+            commit_managed_worker(worker, &client, &response, completion_tokens).await?;
         }
         println!("{}", response);
         if !run_config.continue_repl {
@@ -266,6 +269,7 @@ async fn commit_managed_worker(
     worker: &ManagedWorkerConfig,
     client: &OpenAiClient,
     response: &str,
+    completion_tokens: u32,
 ) -> Result<()> {
     store::append_episode(
         &worker.store_path,
@@ -273,6 +277,7 @@ async fn commit_managed_worker(
         &worker.thread_name,
         &worker.action,
         response,
+        completion_tokens as i64,
     )?;
 
     let runtime = ToolRuntime {
@@ -321,6 +326,7 @@ mod tests {
             "impl",
             "step-1",
             "impl retained episode",
+            14,
         )
         .unwrap();
         store::append_episode(
@@ -329,6 +335,7 @@ mod tests {
             "auth",
             "inspect",
             "auth latest episode",
+            11,
         )
         .unwrap();
         store::append_episode(
@@ -337,6 +344,7 @@ mod tests {
             "tests",
             "inspect",
             "tests latest episode",
+            12,
         )
         .unwrap();
 

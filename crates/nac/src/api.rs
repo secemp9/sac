@@ -3,7 +3,12 @@ use reqwest::Client;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::types::{ChatRequest, ChatResponse, Message, ToolDefinition};
+use crate::types::{ChatRequest, ChatResponse, Message, ToolDefinition, Usage};
+
+pub struct TextCompletion {
+    pub content: String,
+    pub usage: Usage,
+}
 
 #[derive(Clone)]
 pub struct OpenAiClient {
@@ -96,7 +101,11 @@ impl OpenAiClient {
         Err(last_error)
     }
 
-    pub async fn complete_text(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
+    pub async fn complete_text(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<TextCompletion> {
         let url = format!("{}/chat/completions", self.base_url);
         let messages = vec![
             Message::System {
@@ -137,6 +146,7 @@ impl OpenAiClient {
 
         let parsed: ChatResponse = serde_json::from_str(&body)
             .map_err(|e| anyhow!("Failed to parse response from {}: {}", url, e))?;
+        let usage = parsed.usage.clone().unwrap_or_default();
         let choice = parsed
             .choices
             .into_iter()
@@ -148,7 +158,10 @@ impl OpenAiClient {
             } => c,
             _ => return Err(anyhow!("Text completion returned no text content")),
         };
-        Ok(content)
+        Ok(TextCompletion {
+            content,
+            usage,
+        })
     }
 }
 

@@ -8,7 +8,7 @@ use tokio::task::JoinSet;
 
 use crate::api::OpenAiClient;
 use crate::tools::{self, ToolResult, ToolRuntime};
-use crate::types::{Message, ToolCall, ToolDefinition};
+use crate::types::{Message, ToolCall, ToolDefinition, Usage};
 
 #[derive(Clone, Copy, Debug)]
 pub enum AgentMode {
@@ -29,6 +29,7 @@ pub struct Agent {
     pub messages: Vec<Message>,
     tool_defs: Vec<ToolDefinition>,
     tool_runtime: ToolRuntime,
+    last_usage: Option<Usage>,
 }
 
 impl Agent {
@@ -51,9 +52,22 @@ impl Agent {
                 format!(
                     "You are nac, a coding worker. Working directory: {}.\n\n\
                      A retained episode is the durable record of this dispatch. Your final response becomes \
-                     that stored episode, so it should preserve the important results, decisions, file paths, \
-                     current state, verification outcomes, and unresolved issues from the work you completed.\n\n\
-                     Complete the task using your tools. Do not dump raw tool traces unless they matter.",
+                     that stored episode.\n\n\
+                     Complete exactly one bounded action using your tools. Your final response should be a \
+                     compressed work record for future dispatches, not a conversational reply.\n\
+                     Preserve durable information:\n\
+                     - end goal\n\
+                     - current approach\n\
+                     - steps completed so far\n\
+                     - current failure or blocker\n\
+                     - important results\n\
+                     - file paths\n\
+                     - decisions made\n\
+                     - verification outcomes\n\
+                     - current state\n\
+                     - unresolved issues or next useful follow-up\n\n\
+                     Do not dump raw tool traces. Do not restate borrowed context unless it materially affected \
+                     the outcome of this dispatch.",
                     cwd
                 ),
                 tools::worker_tool_definitions(),
@@ -68,6 +82,22 @@ impl Agent {
                      A retained episode is the stored result of one completed thread dispatch. It preserves \
                      the important work from that dispatch so it can be read later and used as input to future \
                      thread work.\n\n\
+                     Threads and episodes are your synchronization primitive. Externalize work into bounded \
+                     thread dispatches instead of doing implementation work yourself.\n\
+                     Reuse a thread when work belongs to the same ongoing stream. Create a new thread only \
+                     for a genuinely distinct workstream.\n\
+                     Each dispatch should be one concrete action. Use source threads only when their latest \
+                     retained episodes are relevant input.\n\
+                     Prefer bounded, information-dense thread dispatches over long in-context reasoning or \
+                     noisy exploration.\n\
+                     When the codebase area or failure mode is unclear, dispatch research before \
+                     implementation. For complex work, you may do multiple rounds of compacted research \
+                     before choosing an implementation action.\n\
+                     Prefer to externalize high-leverage artifacts first: understanding of the relevant \
+                     code, likely approach, verification strategy, and current blocker. If multiple \
+                     independent approaches are plausible, you may explore them in parallel and continue \
+                     with the best episode.\n\
+                     You may dispatch independent threads in parallel when useful.\n\n\
                      Your tools:\n\
                      - thread(name, action, threads?)\n\
                      - threads()\n\
@@ -95,6 +125,7 @@ impl Agent {
                 session_id: config.session_id,
                 active_threads: Arc::new(Mutex::new(HashSet::new())),
             },
+            last_usage: None,
         }
     }
 
@@ -111,6 +142,7 @@ impl Agent {
     }
 
     pub async fn send(&mut self, prompt: &str) -> Result<String> {
+        self.last_usage = None;
         self.messages.push(Message::User {
             content: prompt.to_string(),
         });
@@ -120,6 +152,7 @@ impl Agent {
                 .client
                 .chat(self.messages.clone(), self.tool_defs.clone())
                 .await?;
+            self.last_usage = response.usage.clone();
 
             let choice = response
                 .choices
@@ -170,6 +203,10 @@ impl Agent {
         }
 
         Err(anyhow!("Max iterations ({}) reached", self.max_iterations))
+    }
+
+    pub fn last_completion_tokens(&self) -> Option<u32> {
+        self.last_usage.as_ref().and_then(|usage| usage.completion_tokens)
     }
 }
 
