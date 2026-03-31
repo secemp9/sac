@@ -158,10 +158,11 @@ impl OpenAiClient {
             } => c,
             _ => return Err(anyhow!("Text completion returned no text content")),
         };
-        Ok(TextCompletion {
-            content,
-            usage,
-        })
+        Ok(TextCompletion { content, usage })
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 }
 

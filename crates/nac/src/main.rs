@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
@@ -11,8 +11,10 @@ use uuid::Uuid;
 
 use nac::agent::{Agent, AgentConfig, AgentMode};
 use nac::api::OpenAiClient;
+use nac::events::EventSink;
 use nac::store::{self, WorkerContext};
 use nac::tools::{thread, ToolRuntime};
+use nac::tui::{self, TuiMetadata};
 use nac::types::Message;
 
 #[derive(Parser)]
@@ -61,11 +63,13 @@ struct ManagedWorkerConfig {
 }
 
 struct RunConfig {
+    mode: AgentMode,
     agent: Agent,
     initial_prompt: Option<String>,
     continue_repl: bool,
     managed_worker: Option<ManagedWorkerConfig>,
     client: OpenAiClient,
+    session_id: Option<String>,
 }
 
 #[tokio::main]
@@ -84,15 +88,34 @@ async fn run() -> Result<()> {
     }
 
     let run_config = build_run_config(cli).await?;
+    let use_tui = run_config.mode == AgentMode::Orchestrator
+        && run_config.continue_repl
+        && run_config.managed_worker.is_none()
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && io::stderr().is_terminal();
+
+    if use_tui {
+        let metadata = TuiMetadata {
+            cwd: std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| ".".to_string()),
+            model: run_config.client.model.clone(),
+            base_url: run_config.client.base_url().to_string(),
+            session_id: run_config.session_id.clone(),
+        };
+        return tui::run(run_config.agent, run_config.initial_prompt, metadata).await;
+    }
+
     let mut agent = run_config.agent;
     let client = run_config.client;
 
     if let Some(prompt) = run_config.initial_prompt {
         let response = agent.send(&prompt).await?;
         if let Some(worker) = &run_config.managed_worker {
-            let completion_tokens = agent
-                .last_completion_tokens()
-                .ok_or_else(|| anyhow::anyhow!("worker response did not include completion_tokens"))?;
+            let completion_tokens = agent.last_completion_tokens().ok_or_else(|| {
+                anyhow::anyhow!("worker response did not include completion_tokens")
+            })?;
             commit_managed_worker(worker, &client, &response, completion_tokens).await?;
         }
         println!("{}", response);
@@ -174,10 +197,13 @@ async fn build_run_config(cli: Cli) -> Result<RunConfig> {
                     store_path: store_path.clone(),
                     session_id: Some(session_id.clone()),
                     initial_messages: build_worker_context_messages(&thread_name, &worker_context),
+                    thread_name: Some(thread_name.clone()),
+                    event_sink: EventSink::stderr_prefixed(),
                 },
             );
 
             return Ok(RunConfig {
+                mode: AgentMode::Worker,
                 agent,
                 initial_prompt: Some(action.clone()),
                 continue_repl: false,
@@ -188,6 +214,7 @@ async fn build_run_config(cli: Cli) -> Result<RunConfig> {
                     action,
                 }),
                 client,
+                session_id: None,
             });
         }
 
@@ -199,15 +226,19 @@ async fn build_run_config(cli: Cli) -> Result<RunConfig> {
                 store_path: cli.store_path.unwrap_or_else(store::default_store_path),
                 session_id: None,
                 initial_messages: Vec::new(),
+                thread_name: None,
+                event_sink: EventSink::none(),
             },
         );
 
         return Ok(RunConfig {
+            mode: AgentMode::Worker,
             agent,
             initial_prompt: standalone_prompt.clone(),
             continue_repl: standalone_prompt.is_none(),
             managed_worker: None,
             client,
+            session_id: None,
         });
     }
 
@@ -231,17 +262,21 @@ async fn build_run_config(cli: Cli) -> Result<RunConfig> {
         AgentConfig {
             mode: AgentMode::Orchestrator,
             store_path,
-            session_id: Some(session_id),
+            session_id: Some(session_id.clone()),
             initial_messages: Vec::new(),
+            thread_name: None,
+            event_sink: EventSink::none(),
         },
     );
 
     Ok(RunConfig {
+        mode: AgentMode::Orchestrator,
         agent,
         initial_prompt: cli.prompt,
         continue_repl: !cli.single,
         managed_worker: None,
         client,
+        session_id: Some(session_id),
     })
 }
 
@@ -284,6 +319,7 @@ async fn commit_managed_worker(
         store_path: worker.store_path.clone(),
         session_id: Some(worker.session_id.clone()),
         active_threads: Arc::new(Mutex::new(HashSet::new())),
+        event_sink: EventSink::none(),
     };
     thread::auto_compact_if_needed(&runtime, client, &worker.session_id, &worker.thread_name)
         .await?;

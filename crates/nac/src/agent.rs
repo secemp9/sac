@@ -7,10 +7,11 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::api::OpenAiClient;
+use crate::events::{AgentEvent, EventSink};
 use crate::tools::{self, ToolResult, ToolRuntime};
 use crate::types::{Message, ToolCall, ToolDefinition, Usage};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentMode {
     Worker,
     Orchestrator,
@@ -21,6 +22,8 @@ pub struct AgentConfig {
     pub store_path: PathBuf,
     pub session_id: Option<String>,
     pub initial_messages: Vec<Message>,
+    pub thread_name: Option<String>,
+    pub event_sink: EventSink,
 }
 
 pub struct Agent {
@@ -30,6 +33,8 @@ pub struct Agent {
     tool_defs: Vec<ToolDefinition>,
     tool_runtime: ToolRuntime,
     last_usage: Option<Usage>,
+    event_sink: EventSink,
+    thread_name: Option<String>,
 }
 
 impl Agent {
@@ -124,8 +129,11 @@ impl Agent {
                 store_path: config.store_path,
                 session_id: config.session_id,
                 active_threads: Arc::new(Mutex::new(HashSet::new())),
+                event_sink: config.event_sink.clone(),
             },
             last_usage: None,
+            event_sink: config.event_sink,
+            thread_name: config.thread_name,
         }
     }
 
@@ -137,31 +145,63 @@ impl Agent {
                 store_path: crate::store::default_store_path(),
                 session_id: None,
                 initial_messages: Vec::new(),
+                thread_name: None,
+                event_sink: EventSink::none(),
             },
         )
     }
 
     pub async fn send(&mut self, prompt: &str) -> Result<String> {
         self.last_usage = None;
+        self.emit(AgentEvent::RunStarted {
+            thread_name: self.thread_name.clone(),
+            prompt_preview: preview(prompt, 160),
+        });
         self.messages.push(Message::User {
             content: prompt.to_string(),
         });
 
         for iteration in 0..self.max_iterations {
-            let response = self
+            self.emit(AgentEvent::ModelCallStarted {
+                thread_name: self.thread_name.clone(),
+                iteration: iteration + 1,
+            });
+
+            let response = match self
                 .client
                 .chat(self.messages.clone(), self.tool_defs.clone())
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    self.emit(AgentEvent::Error {
+                        thread_name: self.thread_name.clone(),
+                        message: error.to_string(),
+                    });
+                    return Err(error);
+                }
+            };
             self.last_usage = response.usage.clone();
 
-            let choice = response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| anyhow!("No choices in LLM response"))?;
+            let choice = match response.choices.into_iter().next() {
+                Some(choice) => choice,
+                None => {
+                    let error = anyhow!("No choices in LLM response");
+                    self.emit(AgentEvent::Error {
+                        thread_name: self.thread_name.clone(),
+                        message: error.to_string(),
+                    });
+                    return Err(error);
+                }
+            };
 
             if choice.finish_reason.as_deref() == Some("length") {
-                return Err(anyhow!("Context window full (finish_reason=length)"));
+                let error = anyhow!("Context window full (finish_reason=length)");
+                self.emit(AgentEvent::Error {
+                    thread_name: self.thread_name.clone(),
+                    message: error.to_string(),
+                });
+                return Err(error);
             }
 
             let has_tool_calls = choice
@@ -177,24 +217,30 @@ impl Agent {
             });
 
             if !has_tool_calls {
-                return Ok(choice
+                let content = choice
                     .message
                     .content
-                    .unwrap_or_else(|| "[No response]".to_string()));
+                    .unwrap_or_else(|| "[No response]".to_string());
+                self.emit(AgentEvent::AssistantMessage {
+                    thread_name: self.thread_name.clone(),
+                    content: content.clone(),
+                });
+                self.emit(AgentEvent::RunFinished {
+                    thread_name: self.thread_name.clone(),
+                });
+                return Ok(content);
             }
 
             let tool_calls = choice.message.tool_calls.unwrap_or_default();
-            eprintln!(
-                "[agent] iteration {} — {} tool call(s)",
-                iteration + 1,
-                tool_calls.len()
-            );
-
-            let results =
-                execute_tools_parallel(tool_calls, self.tool_runtime.clone(), self.client.clone())
-                    .await;
-            for (tool_call_id, tool_name, result) in results {
-                eprintln!("[result] {} => {}", tool_name, first_line(&result.content));
+            let results = execute_tools_parallel(
+                tool_calls,
+                self.tool_runtime.clone(),
+                self.client.clone(),
+                self.event_sink.clone(),
+                self.thread_name.clone(),
+            )
+            .await;
+            for (tool_call_id, _tool_name, result) in results {
                 self.messages.push(Message::Tool {
                     tool_call_id,
                     content: result.content,
@@ -202,11 +248,27 @@ impl Agent {
             }
         }
 
-        Err(anyhow!("Max iterations ({}) reached", self.max_iterations))
+        let error = anyhow!("Max iterations ({}) reached", self.max_iterations);
+        self.emit(AgentEvent::Error {
+            thread_name: self.thread_name.clone(),
+            message: error.to_string(),
+        });
+        Err(error)
     }
 
     pub fn last_completion_tokens(&self) -> Option<u32> {
-        self.last_usage.as_ref().and_then(|usage| usage.completion_tokens)
+        self.last_usage
+            .as_ref()
+            .and_then(|usage| usage.completion_tokens)
+    }
+
+    pub fn set_event_sink(&mut self, sink: EventSink) {
+        self.event_sink = sink.clone();
+        self.tool_runtime.event_sink = sink;
+    }
+
+    fn emit(&self, event: AgentEvent) {
+        self.event_sink.emit(event);
     }
 }
 
@@ -214,6 +276,8 @@ async fn execute_tools_parallel(
     tool_calls: Vec<ToolCall>,
     runtime: ToolRuntime,
     client: OpenAiClient,
+    event_sink: EventSink,
+    thread_name: Option<String>,
 ) -> Vec<(String, String, ToolResult)> {
     let mut join_set: JoinSet<(usize, String, String, ToolResult)> = JoinSet::new();
 
@@ -223,7 +287,11 @@ async fn execute_tools_parallel(
         let args_str = tool_call.function.arguments;
         let runtime = runtime.clone();
         let client = client.clone();
-        eprintln!("[tool] {}({})", name, preview(&args_str, 120));
+        event_sink.emit(AgentEvent::ToolCallStarted {
+            thread_name: thread_name.clone(),
+            name: name.clone(),
+            args_preview: preview(&args_str, 120),
+        });
 
         join_set.spawn(async move {
             let args = match serde_json::from_str::<serde_json::Value>(&args_str) {
@@ -252,7 +320,15 @@ async fn execute_tools_parallel(
     let mut results = Vec::new();
     while let Some(join_result) = join_set.join_next().await {
         match join_result {
-            Ok(result) => results.push(result),
+            Ok((index, tool_call_id, tool_name, result)) => {
+                event_sink.emit(AgentEvent::ToolCallFinished {
+                    thread_name: thread_name.clone(),
+                    name: tool_name.clone(),
+                    content_preview: preview(first_line(&result.content), 160),
+                    is_error: result.is_error,
+                });
+                results.push((index, tool_call_id, tool_name, result));
+            }
             Err(error) => results.push((
                 usize::MAX,
                 "unknown".to_string(),

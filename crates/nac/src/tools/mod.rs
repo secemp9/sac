@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
+use crate::events::EventSink;
 use crate::types::ToolDefinition;
 
 pub mod bash;
@@ -23,6 +24,7 @@ pub struct ToolRuntime {
     pub store_path: PathBuf,
     pub session_id: Option<String>,
     pub active_threads: Arc<Mutex<HashSet<String>>>,
+    pub event_sink: EventSink,
 }
 
 static WRITE_LOCK: Mutex<()> = Mutex::const_new(());
