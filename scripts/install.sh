@@ -25,7 +25,7 @@ detect_target() {
     Linux)
       case "$arch" in
         x86_64|amd64)
-          echo "x86_64-unknown-linux-gnu"
+          echo "x86_64-unknown-linux-musl"
           ;;
         *)
           echo "unsupported Linux architecture: $arch" >&2

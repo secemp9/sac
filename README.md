@@ -17,6 +17,8 @@ Optional:
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 
+Linux installs use the portable static build.
+
 Uninstall:
 
 ```sh
