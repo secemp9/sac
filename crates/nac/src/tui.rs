@@ -305,11 +305,10 @@ impl App {
     }
 
     fn render_composer(&mut self, frame: &mut ratatui::Frame, area: Rect) {
-        let border_style = Style::default().fg(Color::White);
-        let title = match self.send_state {
-            SendState::Idle => " ask ",
-            SendState::Pending => working_title(self.working_frame),
-        };
+        if matches!(self.send_state, SendState::Pending) {
+            self.render_working(frame, area);
+            return;
+        }
 
         let footer_height = 1;
         let max_composer_height = area.height.saturating_sub(footer_height).max(3);
@@ -327,8 +326,8 @@ impl App {
         );
 
         let block = Block::bordered()
-            .title(title)
-            .border_style(border_style)
+            .title(" ask ")
+            .border_style(Style::default().fg(Color::DarkGray))
             .padding(Padding::horizontal(1));
         let inner = block.inner(composer_area);
         frame.render_widget(block, composer_area);
@@ -359,6 +358,16 @@ impl App {
             ]));
             frame.render_widget(footer, footer_area);
         }
+    }
+
+    fn render_working(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+
+        let status = Paragraph::new(working_line(self.working_frame));
+        let line_area = Rect::new(area.x, area.y, area.width, 1);
+        frame.render_widget(status, line_area);
     }
 }
 
@@ -798,13 +807,17 @@ fn short_session(session_id: &str) -> String {
     session_id.chars().take(8).collect()
 }
 
-fn working_title(frame: usize) -> &'static str {
-    match frame % 4 {
-        0 => " ask · working ·  ",
-        1 => " ask · working ·· ",
-        2 => " ask · working ···",
-        _ => " ask · working  ·",
-    }
+fn working_line(frame: usize) -> Line<'static> {
+    const FRAMES: [&str; 6] = ["●○○○", "○●○○", "○○●○", "○○○●", "○○●○", "○●○○"];
+    let glyphs = FRAMES[frame % FRAMES.len()];
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled("working", Style::default().fg(Color::White)),
+        Span::raw(" "),
+        Span::styled("[", Style::default().fg(Color::DarkGray)),
+        Span::styled(glyphs.to_string(), Style::default().fg(Color::Gray)),
+        Span::styled("]", Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 fn truncate_episode_preview(content: &str) -> String {
