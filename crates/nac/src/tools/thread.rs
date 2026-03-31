@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::api::OpenAiClient;
+use crate::events::{decode_stderr_event, AgentEvent};
 use crate::store;
 use crate::tools::{require_str, require_string_array, ToolResult, ToolRuntime};
 use crate::types::ToolDefinition;
@@ -107,6 +108,12 @@ pub async fn execute_dispatch(args: Value, runtime: &ToolRuntime) -> ToolResult 
         .and_then(|v| v.parse().ok())
         .unwrap_or(300);
 
+    runtime.event_sink.emit(AgentEvent::ThreadStarted {
+        name: thread_name.clone(),
+        action: action.clone(),
+        source_threads: source_threads.clone(),
+    });
+
     let result = run_worker(
         runtime,
         &session_id,
@@ -119,15 +126,33 @@ pub async fn execute_dispatch(args: Value, runtime: &ToolRuntime) -> ToolResult 
     unmark_thread_active(runtime, &thread_name).await;
 
     match result {
-        Err(e) => ToolResult {
-            content: format!("Failed to spawn thread '{}': {}", thread_name, e),
-            is_error: true,
-        },
-        Ok(run) if run.timed_out => ToolResult {
-            content: format!("Thread '{}' timed out after {}s", thread_name, timeout_secs),
-            is_error: true,
-        },
+        Err(e) => {
+            runtime.event_sink.emit(AgentEvent::Error {
+                thread_name: Some(thread_name.clone()),
+                message: format!("Failed to spawn thread '{}': {}", thread_name, e),
+            });
+            ToolResult {
+                content: format!("Failed to spawn thread '{}': {}", thread_name, e),
+                is_error: true,
+            }
+        }
+        Ok(run) if run.timed_out => {
+            runtime.event_sink.emit(AgentEvent::ThreadFinished {
+                name: thread_name.clone(),
+                exit_code: run.exit_code,
+                timed_out: true,
+            });
+            ToolResult {
+                content: format!("Thread '{}' timed out after {}s", thread_name, timeout_secs),
+                is_error: true,
+            }
+        }
         Ok(run) if run.exit_code != 0 => {
+            runtime.event_sink.emit(AgentEvent::ThreadFinished {
+                name: thread_name.clone(),
+                exit_code: run.exit_code,
+                timed_out: false,
+            });
             let details = if !run.stderr.trim().is_empty() {
                 run.stderr.trim().to_string()
             } else if !run.stdout.trim().is_empty() {
@@ -143,10 +168,17 @@ pub async fn execute_dispatch(args: Value, runtime: &ToolRuntime) -> ToolResult 
                 is_error: true,
             }
         }
-        Ok(run) => ToolResult {
-            content: run.stdout.trim().to_string(),
-            is_error: false,
-        },
+        Ok(run) => {
+            runtime.event_sink.emit(AgentEvent::ThreadFinished {
+                name: thread_name.clone(),
+                exit_code: run.exit_code,
+                timed_out: false,
+            });
+            ToolResult {
+                content: run.stdout.trim().to_string(),
+                is_error: false,
+            }
+        }
     }
 }
 
@@ -300,11 +332,10 @@ async fn compact_thread(
             &source,
         )
         .await?;
-    let compacted_tokens = compacted
-        .usage
-        .completion_tokens
-        .ok_or_else(|| anyhow::anyhow!("compaction response did not include completion_tokens"))?
-        as i64;
+    let compacted_tokens =
+        compacted.usage.completion_tokens.ok_or_else(|| {
+            anyhow::anyhow!("compaction response did not include completion_tokens")
+        })? as i64;
 
     let context_tokens = store::compact_thread(
         &runtime.store_path,
@@ -392,16 +423,25 @@ async fn run_worker(
     let mut child = command.spawn()?;
 
     let stderr = child.stderr.take().unwrap();
+    let event_sink = runtime.event_sink.clone();
+    let thread_name_for_logs = thread_name.to_string();
     let stderr_handle = tokio::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
         let mut output = String::new();
         while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("  [thread] {}", line);
-            if !output.is_empty() {
-                output.push('\n');
+            if let Some(event) = decode_stderr_event(&line) {
+                event_sink.emit(event);
+            } else {
+                event_sink.emit(AgentEvent::ThreadLog {
+                    name: thread_name_for_logs.clone(),
+                    line: line.clone(),
+                });
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&line);
             }
-            output.push_str(&line);
         }
         output
     });

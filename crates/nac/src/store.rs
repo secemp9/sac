@@ -412,7 +412,15 @@ mod tests {
             13,
         )
         .unwrap();
-        append_episode(&store_path, session_id, "tests", "inspect", "test episode", 7).unwrap();
+        append_episode(
+            &store_path,
+            session_id,
+            "tests",
+            "inspect",
+            "test episode",
+            7,
+        )
+        .unwrap();
 
         let threads = list_threads(&store_path, session_id).unwrap();
         assert_eq!(threads.len(), 2);
@@ -438,7 +446,15 @@ mod tests {
         initialize(&store_path).unwrap();
 
         let session_id = "session-b";
-        append_episode(&store_path, session_id, "auth", "inspect", "self history", 9).unwrap();
+        append_episode(
+            &store_path,
+            session_id,
+            "auth",
+            "inspect",
+            "self history",
+            9,
+        )
+        .unwrap();
         append_episode(&store_path, session_id, "tests", "scan", "old source", 8).unwrap();
         append_episode(&store_path, session_id, "tests", "scan", "new source", 8).unwrap();
 
