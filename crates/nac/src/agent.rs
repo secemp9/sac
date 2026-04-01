@@ -75,6 +75,8 @@ impl Agent {
                      - verification outcomes\n\
                      - current state\n\
                      - unresolved issues or next useful follow-up\n\n\
+                     Avoid creating extra Markdown documents or notes files unless the user explicitly \
+                     asks for them.\n\
                      Do not dump raw tool traces. Do not restate borrowed context unless it materially affected \
                      the outcome of this dispatch.",
                     cwd
@@ -106,6 +108,8 @@ impl Agent {
                      code, likely approach, verification strategy, and current blocker. If multiple \
                      independent approaches are plausible, you may explore them in parallel and continue \
                      with the best episode.\n\
+                     Avoid creating extra Markdown documents or notes files unless the user explicitly \
+                     asks for them.\n\
                      You may dispatch independent threads in parallel when useful.\n\n\
                      Your tools:\n\
                      - thread(name, action, threads?)\n\
