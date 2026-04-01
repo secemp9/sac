@@ -188,9 +188,11 @@ impl PodmanSession {
             OsString::from(self.container_name.clone()),
         ];
 
-        if let Some((uid, gid)) = current_uid_gid() {
-            args.push(OsString::from("--user"));
-            args.push(OsString::from(format!("{uid}:{gid}")));
+        if self.spec.mounts.iter().any(|mount| !mount.read_only) {
+            if let Some((uid, gid)) = current_uid_gid() {
+                args.push(OsString::from("--user"));
+                args.push(OsString::from(format!("{uid}:{gid}")));
+            }
         }
 
         for mount in &self.spec.mounts {
@@ -305,8 +307,28 @@ mod tests {
         assert!(rendered.starts_with(&["run".to_string(), "-d".to_string(), "--rm".to_string(),]));
         assert!(rendered.contains(&"-v".to_string()));
         assert!(rendered.contains(&"/tmp/project:/workspace:rw".to_string()));
+        assert!(rendered.contains(&"--user".to_string()));
         assert!(rendered
             .iter()
             .any(|value| value.contains("sleep infinity")));
+    }
+
+    #[test]
+    fn create_container_args_skip_user_without_rw_mounts() {
+        let session = PodmanSession::new(
+            SandboxSpec {
+                image: DEFAULT_SANDBOX_IMAGE.to_string(),
+                mounts: Vec::new(),
+                workdir: PathBuf::from(DEFAULT_SANDBOX_WORKDIR),
+            },
+            "empty".to_string(),
+            false,
+        );
+        let rendered: Vec<String> = session
+            .create_container_args()
+            .into_iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect();
+        assert!(!rendered.contains(&"--user".to_string()));
     }
 }
