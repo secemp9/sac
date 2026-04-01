@@ -248,7 +248,7 @@ impl Drop for PodmanSession {
             .arg(&self.container_name)
             .stdout(StdStdio::null())
             .stderr(StdStdio::null())
-            .status();
+            .spawn();
     }
 }
 
