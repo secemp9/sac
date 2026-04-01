@@ -25,7 +25,7 @@ Uninstall:
 curl -fsSL https://raw.githubusercontent.com/sapiosaturn/nac/main/scripts/uninstall.sh | sh
 ```
 
-`nac` can run tools inside a Podman sandbox:
+`nac` can run tools inside a Podman sandbox (requires Podman to be installed):
 
 ```sh
 nac --sandbox

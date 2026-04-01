@@ -7,12 +7,15 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Instant;
+use tokio::process::Command;
+use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
-mod podman;
 mod task;
 
 use task::{Task, TaskStatus, TaskStore};
@@ -71,18 +74,15 @@ struct AppState {
     api_key: String,
     base_url: String,
     model: String,
-    default_image: String,
+    nac_bin: PathBuf,
+    running_tasks: std::sync::Arc<Mutex<HashMap<String, u32>>>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    podman::check_available().await?;
-
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
     let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_default();
     let model = std::env::var("OPENAI_MODEL").unwrap_or_default();
-    let default_image =
-        std::env::var("NAC_DEFAULT_IMAGE").unwrap_or_else(|_| "nac:base".to_string());
     let port: u16 = std::env::var("NAC_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -93,7 +93,8 @@ async fn main() -> Result<()> {
         api_key,
         base_url,
         model,
-        default_image,
+        nac_bin: resolve_nac_binary()?,
+        running_tasks: std::sync::Arc::new(Mutex::new(HashMap::new())),
     };
 
     let app = Router::new()
@@ -129,8 +130,10 @@ async fn create_task(
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let task_id = uuid::Uuid::new_v4().to_string();
-    let container_name = format!("nac-{}", &task_id[..8]);
-    let image = req.image.unwrap_or(state.default_image.clone());
+    let image = req.image.clone().ok_or((
+        StatusCode::BAD_REQUEST,
+        "task image required: pass `image` in the request".to_string(),
+    ))?;
     let source_branch = req.branch.unwrap_or_else(|| "main".to_string());
     let task_branch = format!("nac/task-{}", &task_id[..8]);
 
@@ -146,7 +149,7 @@ async fn create_task(
 
     let new_task = Task {
         id: task_id.clone(),
-        container_name: container_name.clone(),
+        container_name: task_id.clone(),
         status: TaskStatus::Running,
         prompt: req.prompt.clone(),
         output: None,
@@ -170,12 +173,11 @@ async fn create_task(
     let repo_url = req.repo_url.clone();
     let parent_task_id = req.parent_task_id.clone();
     let spawn_task_id = task_id.clone();
-    let spawn_container = container_name.clone();
 
     tokio::spawn(async move {
         let start = Instant::now();
         let params = TaskParams {
-            container_name: &spawn_container,
+            task_id: &spawn_task_id,
             image: &image,
             repo_url: repo_url.as_deref(),
             source_branch: &source_branch,
@@ -217,7 +219,7 @@ async fn create_task(
 }
 
 struct TaskParams<'a> {
-    container_name: &'a str,
+    task_id: &'a str,
     image: &'a str,
     repo_url: Option<&'a str>,
     source_branch: &'a str,
@@ -244,16 +246,7 @@ async fn run_task(state: &AppState, p: &TaskParams<'_>) -> Result<(String, Optio
         git_clone(&workspace, url, checkout_branch).await?;
     }
 
-    let mut env_vars: Vec<(&str, &str)> = vec![("OPENAI_API_KEY", &state.api_key)];
-    if !state.base_url.is_empty() {
-        env_vars.push(("OPENAI_BASE_URL", &state.base_url));
-    }
-    if !state.model.is_empty() {
-        env_vars.push(("OPENAI_MODEL", &state.model));
-    }
-
-    let result =
-        podman::run_ephemeral(p.container_name, p.image, &workspace, &env_vars, p.prompt).await?;
+    let result = run_nac_task(state, &workspace, p.image, p.prompt, p.task_id).await?;
 
     let branch = if p.repo_url.is_some() {
         git_push_changes(
@@ -409,10 +402,84 @@ async fn kill_task(
         .ok_or((StatusCode::NOT_FOUND, format!("task '{}' not found", id)))?;
 
     if matches!(t.status, TaskStatus::Running) {
-        let _ = podman::kill_container(&t.container_name).await;
+        if let Some(pid) = state.running_tasks.lock().await.remove(&id) {
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
         let _ = task::update_failed(&state.tasks, &id, "killed by user").await;
         eprintln!("[task] {} killed", &id[..id.len().min(8)]);
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+struct RunResult {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+async fn run_nac_task(
+    state: &AppState,
+    workspace: &PathBuf,
+    image: &str,
+    prompt: &str,
+    task_id: &str,
+) -> Result<RunResult> {
+    let mount = format!("{}:/workspace", workspace.display());
+    let mut command = Command::new(&state.nac_bin);
+    command
+        .arg("--single")
+        .arg("--sandbox")
+        .arg("--no-mount-cwd")
+        .arg("--mount")
+        .arg(&mount)
+        .arg("--sandbox-image")
+        .arg(image)
+        .arg(prompt)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    if !state.api_key.is_empty() {
+        command.env("OPENAI_API_KEY", &state.api_key);
+    }
+    if !state.base_url.is_empty() {
+        command.env("OPENAI_BASE_URL", &state.base_url);
+    }
+    if !state.model.is_empty() {
+        command.env("OPENAI_MODEL", &state.model);
+    }
+
+    let child = command.spawn()?;
+    if let Some(pid) = child.id() {
+        state
+            .running_tasks
+            .lock()
+            .await
+            .insert(task_id.to_string(), pid);
+    }
+    let output = child.wait_with_output().await?;
+    state.running_tasks.lock().await.remove(task_id);
+
+    Ok(RunResult {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
+}
+
+fn resolve_nac_binary() -> Result<PathBuf> {
+    if let Ok(current_exe) = std::env::current_exe() {
+        let sibling = current_exe.with_file_name("nac");
+        if sibling.exists() {
+            return Ok(sibling);
+        }
+    }
+
+    Ok(PathBuf::from("nac"))
 }
