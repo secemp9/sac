@@ -8,6 +8,7 @@ use tokio::task::JoinSet;
 
 use crate::api::OpenAiClient;
 use crate::events::{AgentEvent, EventSink};
+use crate::mcp::McpRegistry;
 use crate::sandbox::SandboxSession;
 use crate::tools::{self, ToolResult, ToolRuntime};
 use crate::types::{Message, ToolCall, ToolDefinition, Usage};
@@ -27,6 +28,8 @@ pub struct AgentConfig {
     pub event_sink: EventSink,
     pub working_directory: String,
     pub sandbox: Option<SandboxSession>,
+    pub mcp: Option<Arc<McpRegistry>>,
+    pub extra_tool_defs: Vec<ToolDefinition>,
 }
 
 pub struct Agent {
@@ -53,7 +56,7 @@ impl Agent {
 
         let cwd = config.working_directory.clone();
 
-        let (system_prompt, tool_defs) = match config.mode {
+        let (system_prompt, mut tool_defs) = match config.mode {
             AgentMode::Worker => (
                 format!(
                     "You are nac, a coding worker. Working directory: {}.\n\n\
@@ -72,6 +75,8 @@ impl Agent {
                      - verification outcomes\n\
                      - current state\n\
                      - unresolved issues or next useful follow-up\n\n\
+                     Avoid creating extra Markdown documents or notes files unless the user explicitly \
+                     asks for them.\n\
                      Do not dump raw tool traces. Do not restate borrowed context unless it materially affected \
                      the outcome of this dispatch.",
                     cwd
@@ -103,6 +108,8 @@ impl Agent {
                      code, likely approach, verification strategy, and current blocker. If multiple \
                      independent approaches are plausible, you may explore them in parallel and continue \
                      with the best episode.\n\
+                     Avoid creating extra Markdown documents or notes files unless the user explicitly \
+                     asks for them.\n\
                      You may dispatch independent threads in parallel when useful.\n\n\
                      Your tools:\n\
                      - thread(name, action, threads?)\n\
@@ -115,6 +122,9 @@ impl Agent {
                 tools::orchestrator_tool_definitions(),
             ),
         };
+        if config.mode == AgentMode::Worker {
+            tool_defs.extend(config.extra_tool_defs);
+        }
 
         let mut messages = vec![Message::System {
             content: system_prompt,
@@ -132,6 +142,7 @@ impl Agent {
                 active_threads: Arc::new(Mutex::new(HashSet::new())),
                 event_sink: config.event_sink.clone(),
                 sandbox: config.sandbox,
+                mcp: config.mcp,
             },
             last_usage: None,
             event_sink: config.event_sink,
@@ -153,6 +164,8 @@ impl Agent {
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| ".".to_string()),
                 sandbox: None,
+                mcp: None,
+                extra_tool_defs: Vec::new(),
             },
         )
     }
