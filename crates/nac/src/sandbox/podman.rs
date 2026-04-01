@@ -86,15 +86,7 @@ impl PodmanSession {
         stdin: Option<Vec<u8>>,
     ) -> Result<std::process::Output> {
         let mut command = Command::new("podman");
-        command
-            .arg("exec")
-            .arg("--workdir")
-            .arg(&self.spec.workdir)
-            .arg(&self.container_name)
-            .arg(program);
-        for arg in args {
-            command.arg(arg);
-        }
+        command.args(self.exec_args(program, args, stdin.is_some()));
 
         if stdin.is_some() {
             command.stdin(Stdio::piped());
@@ -140,6 +132,23 @@ impl PodmanSession {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::inherit());
         command
+    }
+
+    fn exec_args(&self, program: &str, args: &[String], interactive: bool) -> Vec<OsString> {
+        let mut command_args = vec![
+            OsString::from("exec"),
+            OsString::from("--workdir"),
+            OsString::from(self.spec.workdir.display().to_string()),
+        ];
+        if interactive {
+            command_args.push(OsString::from("-i"));
+        }
+        command_args.push(OsString::from(self.container_name.clone()));
+        command_args.push(OsString::from(program));
+        for arg in args {
+            command_args.push(OsString::from(arg));
+        }
+        command_args
     }
 
     async fn container_exists(&self) -> Result<bool> {
@@ -360,5 +369,31 @@ mod tests {
             .map(|value| value.to_string_lossy().to_string())
             .collect();
         assert!(!rendered.contains(&"--userns".to_string()));
+    }
+
+    #[test]
+    fn exec_args_enable_interactive_mode_when_stdin_is_present() {
+        let args = sample_session().exec_args(
+            "python3",
+            &["-c".to_string(), "print('hi')".to_string()],
+            true,
+        );
+        let rendered: Vec<String> = args
+            .into_iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(rendered.first().map(String::as_str), Some("exec"));
+        assert!(rendered.contains(&"-i".to_string()));
+    }
+
+    #[test]
+    fn exec_args_skip_interactive_mode_without_stdin() {
+        let args =
+            sample_session().exec_args("bash", &["-lc".to_string(), "pwd".to_string()], false);
+        let rendered: Vec<String> = args
+            .into_iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect();
+        assert!(!rendered.contains(&"-i".to_string()));
     }
 }
