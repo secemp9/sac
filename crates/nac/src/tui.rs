@@ -117,6 +117,11 @@ impl UiEntry {
         self
     }
 
+    fn with_spacing_after(mut self, spacing_after: u16) -> Self {
+        self.spacing_after = spacing_after;
+        self
+    }
+
     fn symbol_text(&self) -> &'static str {
         self.symbol_override.unwrap_or_else(|| self.kind.symbol())
     }
@@ -237,15 +242,18 @@ impl App {
             AgentEvent::AssistantMessage {
                 thread_name,
                 content,
-            } => match thread_name {
-                Some(thread_name) => vec![UiEntry::new(
-                    EntryKind::Assistant,
-                    format!("{thread_name} • retained episode"),
-                    truncate_episode_preview(&content),
-                )
-                .muted_body()],
-                None => vec![UiEntry::new(EntryKind::Assistant, "response", content)],
-            },
+            } => {
+                match thread_name {
+                    Some(thread_name) => vec![UiEntry::new(
+                        EntryKind::Assistant,
+                        format!("{thread_name} • retained episode"),
+                        truncate_episode_preview(&content),
+                    )
+                    .muted_body()],
+                    None => vec![UiEntry::new(EntryKind::Assistant, "response", content)
+                        .with_spacing_after(2)],
+                }
+            }
             AgentEvent::Error {
                 thread_name,
                 message,
