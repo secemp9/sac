@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
@@ -25,7 +25,7 @@ use tokio::time::{self, MissedTickBehavior};
 use crate::agent::Agent;
 use crate::events::{AgentEvent, EventSink};
 
-const COMPOSER_VIEWPORT_HEIGHT: u16 = 8;
+const COMPOSER_VIEWPORT_HEIGHT: u16 = 6;
 const EPISODE_PREVIEW_LINE_LIMIT: usize = 8;
 const EPISODE_PREVIEW_CHAR_LIMIT: usize = 700;
 
@@ -134,6 +134,7 @@ struct App {
     quit: bool,
     pending_error_reported: bool,
     working_frame: usize,
+    working_started_at: Option<Instant>,
 }
 
 impl App {
@@ -144,6 +145,7 @@ impl App {
             quit: false,
             pending_error_reported: false,
             working_frame: 0,
+            working_started_at: None,
         }
     }
 
@@ -353,6 +355,7 @@ impl App {
 
         if footer_area.height > 0 {
             let footer = Paragraph::new(Line::from(vec![
+                Span::raw(" "),
                 Span::styled("/exit to quit", Style::default().fg(Color::DarkGray)),
                 Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
                 Span::styled("ctrl-c to force quit", Style::default().fg(Color::DarkGray)),
@@ -366,7 +369,11 @@ impl App {
             return;
         }
 
-        let status = Paragraph::new(working_line(self.working_frame));
+        let elapsed = self
+            .working_started_at
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        let status = Paragraph::new(working_line(self.working_frame, elapsed));
         let line_area = Rect::new(area.x, area.y, area.width, 1);
         frame.render_widget(status, line_area);
     }
@@ -442,6 +449,7 @@ pub async fn run(
                 Some(result) = result_rx.recv() => {
                     app.send_state = SendState::Idle;
                     app.working_frame = 0;
+                    app.working_started_at = None;
                     if let Err(error) = result {
                         if !app.pending_error_reported {
                             print_entry(&mut terminal, &UiEntry::new(EntryKind::Error, "send", error))?;
@@ -489,6 +497,7 @@ fn submit_prompt(
     app.send_state = SendState::Pending;
     app.pending_error_reported = false;
     app.working_frame = 0;
+    app.working_started_at = Some(Instant::now());
 
     tokio::spawn(async move {
         let result = {
@@ -594,12 +603,21 @@ fn wrapped_entry_lines(entry: &UiEntry, width: u16) -> Vec<String> {
     }
 
     let width = width as usize;
+    if entry.kind == EntryKind::Log {
+        let wrapped = wrap_soft_line(
+            &format!("{} {} {}", entry.symbol_text(), entry.title, entry.body),
+            width,
+        );
+        return if wrapped.is_empty() {
+            vec![String::new()]
+        } else {
+            wrapped
+        };
+    }
+
     let mut wrapped = wrap_with_prefix(&format!("{} ", entry.symbol_text()), &entry.title, width);
 
-    if entry.kind == EntryKind::Log && !entry.body.is_empty() {
-        let log_prefix = " ".repeat(entry.symbol_text().chars().count() + 1);
-        wrapped.extend(wrap_with_prefix(&log_prefix, &entry.body, width));
-    } else if !entry.body.is_empty() {
+    if !entry.body.is_empty() {
         for line in entry.body.split('\n') {
             wrapped.extend(wrap_with_prefix("  ", line, width));
         }
@@ -816,9 +834,10 @@ fn short_session(session_id: &str) -> String {
     session_id.chars().take(8).collect()
 }
 
-fn working_line(frame: usize) -> Line<'static> {
+fn working_line(frame: usize, elapsed: Duration) -> Line<'static> {
     const FRAMES: [&str; 6] = ["●○○○", "○●○○", "○○●○", "○○○●", "○○●○", "○●○○"];
     let glyphs = FRAMES[frame % FRAMES.len()];
+    let elapsed_text = format_elapsed(elapsed);
     Line::from(vec![
         Span::raw("  "),
         Span::styled("working", Style::default().fg(Color::White)),
@@ -826,7 +845,16 @@ fn working_line(frame: usize) -> Line<'static> {
         Span::styled("[", Style::default().fg(Color::DarkGray)),
         Span::styled(glyphs.to_string(), Style::default().fg(Color::Gray)),
         Span::styled("]", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(elapsed_text, Style::default().fg(Color::DarkGray)),
     ])
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let total_seconds = elapsed.as_secs();
+    let minutes = total_seconds / 60;
+    let seconds = total_seconds % 60;
+    format!("{minutes}m{seconds:02}s")
 }
 
 fn truncate_episode_preview(content: &str) -> String {
