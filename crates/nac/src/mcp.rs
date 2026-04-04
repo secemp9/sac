@@ -510,6 +510,7 @@ fn expand_env(input: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_ENV_LOCK;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -521,6 +522,7 @@ mod tests {
 
     #[test]
     fn env_expansion_replaces_placeholders() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let original = env::var("NAC_MCP_TEST").ok();
         unsafe {
             env::set_var("NAC_MCP_TEST", "expanded");
@@ -567,6 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_global_config_disables_mcp_instead_of_failing() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let original_nac_home = env::var_os("NAC_HOME");
         let original_xdg = env::var_os("XDG_CONFIG_HOME");
         let unique = SystemTime::now()

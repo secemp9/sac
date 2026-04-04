@@ -57,6 +57,10 @@ impl SandboxSession {
         &self.inner.spec().image
     }
 
+    pub fn spec(&self) -> &SandboxSpec {
+        self.inner.spec()
+    }
+
     pub fn status_text(&self) -> String {
         format!("on (podman, image={})", self.image())
     }

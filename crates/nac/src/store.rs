@@ -338,9 +338,22 @@ mod tests {
         initialize(&store_path).unwrap();
 
         let session_id = "session-a";
-        append_episode(&store_path, session_id, "auth", "inspect", "first auth episode").unwrap();
-        append_episode(&store_path, session_id, "auth", "refactor", "second auth episode")
-            .unwrap();
+        append_episode(
+            &store_path,
+            session_id,
+            "auth",
+            "inspect",
+            "first auth episode",
+        )
+        .unwrap();
+        append_episode(
+            &store_path,
+            session_id,
+            "auth",
+            "refactor",
+            "second auth episode",
+        )
+        .unwrap();
         append_episode(&store_path, session_id, "tests", "inspect", "test episode").unwrap();
 
         let threads = list_threads(&store_path, session_id).unwrap();

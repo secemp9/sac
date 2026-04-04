@@ -18,3 +18,7 @@ pub fn nac_home_dir() -> Option<PathBuf> {
 pub fn nac_config_path() -> Option<PathBuf> {
     nac_home_dir().map(|dir| dir.join("config.toml"))
 }
+
+pub fn nac_sessions_path() -> Option<PathBuf> {
+    nac_home_dir().map(|dir| dir.join("sessions.db"))
+}

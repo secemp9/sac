@@ -220,11 +220,9 @@ fn default_max_bytes() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_ENV_LOCK;
     use std::env;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -238,7 +236,7 @@ mod tests {
 
     #[test]
     fn loads_global_and_project_files_in_order() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let root = temp_dir("hierarchy");
         let nac_home = root.join("nac-home");
         let project_root = root.join("repo");
@@ -288,7 +286,7 @@ mod tests {
 
     #[test]
     fn non_git_scope_only_loads_current_directory_file() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let root = temp_dir("non_git");
         let parent = root.join("parent");
         let child = parent.join("child");
@@ -337,7 +335,7 @@ mod tests {
 
     #[test]
     fn project_fallback_filenames_are_respected() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let root = temp_dir("fallback_names");
         let nac_home = root.join("nac-home");
         let project = root.join("repo");

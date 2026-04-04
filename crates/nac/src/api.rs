@@ -20,12 +20,22 @@ pub struct OpenAiClient {
 
 impl OpenAiClient {
     pub fn from_env() -> Result<Self> {
+        Self::from_env_with_overrides(None, None)
+    }
+
+    pub fn from_env_with_overrides(
+        base_url_override: Option<String>,
+        model_override: Option<String>,
+    ) -> Result<Self> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| anyhow!("OPENAI_API_KEY environment variable is not set"))?;
-        let base_url = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-        let model =
-            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string());
+        let base_url = base_url_override.unwrap_or_else(|| {
+            std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string())
+        });
+        let model = model_override.unwrap_or_else(|| {
+            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4-2026-03-05".to_string())
+        });
         Ok(Self {
             client: Client::new(),
             base_url,
@@ -181,13 +191,11 @@ impl OpenAiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::TEST_ENV_LOCK;
 
     #[test]
     fn test_missing_api_key_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
 
         let original = std::env::var("OPENAI_API_KEY").ok();
         unsafe {

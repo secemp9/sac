@@ -329,6 +329,10 @@ impl Agent {
         self.tool_runtime.event_sink = sink;
     }
 
+    pub fn restore_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
     fn emit(&self, event: AgentEvent) {
         self.event_sink.emit(event);
     }

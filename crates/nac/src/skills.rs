@@ -675,6 +675,7 @@ struct ParsedSkillFile {
 mod tests {
     use super::*;
     use crate::sandbox::{SandboxSpec, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_WORKDIR};
+    use crate::TEST_ENV_LOCK;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -700,6 +701,7 @@ mod tests {
 
     #[test]
     fn project_sources_override_user_sources() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let root = temp_dir("precedence");
         let repo = root.join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();

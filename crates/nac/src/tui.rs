@@ -24,6 +24,8 @@ use tokio::time::{self, MissedTickBehavior};
 
 use crate::agent::Agent;
 use crate::events::{AgentEvent, EventSink};
+use crate::sessions::{self, SessionSnapshot};
+use crate::types::Message;
 
 const COMPOSER_VIEWPORT_HEIGHT: u16 = 6;
 const EPISODE_PREVIEW_LINE_LIMIT: usize = 8;
@@ -399,6 +401,8 @@ pub async fn run(
     mut agent: Agent,
     initial_prompt: Option<String>,
     metadata: TuiMetadata,
+    restored_messages: Vec<Message>,
+    mut session_snapshot: Option<SessionSnapshot>,
 ) -> Result<()> {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<CrosstermEvent>();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -420,6 +424,7 @@ pub async fn run(
 
     let mut app = App::new();
     print_preamble(&mut terminal, &metadata)?;
+    print_restored_history(&mut terminal, &restored_messages)?;
     terminal.draw(|frame| app.render(frame))?;
 
     if let Some(prompt) = initial_prompt {
@@ -459,6 +464,10 @@ pub async fn run(
                     app.send_state = SendState::Idle;
                     app.working_frame = 0;
                     app.working_started_at = None;
+                    if let Some(snapshot) = session_snapshot.as_mut() {
+                        let agent = agent.lock().await;
+                        persist_session_snapshot(snapshot, &agent)?;
+                    }
                     if let Err(error) = result {
                         if !app.pending_error_reported {
                             print_entry(&mut terminal, &UiEntry::new(EntryKind::Error, "send", error))?;
@@ -687,6 +696,40 @@ fn print_preamble(terminal: &mut UiTerminal, metadata: &TuiMetadata) -> Result<(
         )?;
     }
     print_blank_line(terminal)?;
+    Ok(())
+}
+
+fn print_restored_history(terminal: &mut UiTerminal, messages: &[Message]) -> Result<()> {
+    let mut printed_any = false;
+    for message in messages {
+        match message {
+            Message::User { content } => {
+                print_entry(terminal, &UiEntry::new(EntryKind::User, "prompt", content))?;
+                printed_any = true;
+            }
+            Message::Assistant {
+                content: Some(content),
+                ..
+            } => {
+                print_entry(
+                    terminal,
+                    &UiEntry::new(EntryKind::Assistant, "response", content).with_spacing_after(2),
+                )?;
+                printed_any = true;
+            }
+            _ => {}
+        }
+    }
+    if printed_any {
+        print_blank_line(terminal)?;
+    }
+    Ok(())
+}
+
+fn persist_session_snapshot(snapshot: &mut SessionSnapshot, agent: &Agent) -> Result<()> {
+    let refreshed = sessions::refresh_snapshot(snapshot, agent.messages.clone());
+    sessions::save_session(&refreshed)?;
+    *snapshot = refreshed;
     Ok(())
 }
 

@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 pub mod agent;
 pub mod agents_md;
 pub mod api;
@@ -5,8 +7,11 @@ pub mod events;
 pub mod mcp;
 pub mod paths;
 pub mod sandbox;
+pub mod sessions;
 pub mod skills;
 pub mod store;
 pub mod tools;
 pub mod tui;
 pub mod types;
+
+pub static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
