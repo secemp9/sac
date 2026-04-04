@@ -19,6 +19,8 @@ Optional:
 
 Linux installs use the portable static build.
 
+`AGENTS.md` is loaded hierarchically from the project and globally from `NAC_HOME` / `~/.config/nac`. Skills are discovered from project and user skill directories and activated from workers with `activate_skill(...)`. Sessions can be resumed with `nac resume [SESSION_ID]`. Thread history does not auto-compact right now.
+
 Uninstall:
 
 ```sh
