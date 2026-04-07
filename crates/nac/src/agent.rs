@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use crate::api::OpenAiClient;
+use crate::api::ModelClient;
 use crate::events::{AgentEvent, EventSink};
 use crate::mcp::McpRegistry;
 use crate::sandbox::SandboxSession;
@@ -36,7 +36,7 @@ pub struct AgentConfig {
 }
 
 pub struct Agent {
-    client: OpenAiClient,
+    client: ModelClient,
     max_iterations: usize,
     pub messages: Vec<Message>,
     tool_defs: Vec<ToolDefinition>,
@@ -46,11 +46,11 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(client: OpenAiClient) -> Self {
+    pub fn new(client: ModelClient) -> Self {
         Self::default(client)
     }
 
-    pub fn with_config(client: OpenAiClient, config: AgentConfig) -> Self {
+    pub fn with_config(client: ModelClient, config: AgentConfig) -> Self {
         let max_iterations = std::env::var("AGENT_MAX_ITERATIONS")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -198,7 +198,7 @@ impl Agent {
         }
     }
 
-    pub fn default(client: OpenAiClient) -> Self {
+    pub fn default(client: ModelClient) -> Self {
         Self::with_config(
             client,
             AgentConfig {
@@ -237,7 +237,7 @@ impl Agent {
 
             let response = match self
                 .client
-                .chat(self.messages.clone(), self.tool_defs.clone())
+                .send_turn(self.messages.clone(), self.tool_defs.clone())
                 .await
             {
                 Ok(response) => response,
@@ -249,19 +249,7 @@ impl Agent {
                     return Err(error);
                 }
             };
-            let choice = match response.choices.into_iter().next() {
-                Some(choice) => choice,
-                None => {
-                    let error = anyhow!("No choices in LLM response");
-                    self.emit(AgentEvent::Error {
-                        thread_name: self.thread_name.clone(),
-                        message: error.to_string(),
-                    });
-                    return Err(error);
-                }
-            };
-
-            if choice.finish_reason.as_deref() == Some("length") {
+            if response.finish_reason.as_deref() == Some("length") {
                 let error = anyhow!(
                     "Context window full (finish_reason=length). nac does not auto-compact thread history right now; retry with a narrower prompt, a fresh thread, or less carried context."
                 );
@@ -272,22 +260,23 @@ impl Agent {
                 return Err(error);
             }
 
-            let has_tool_calls = choice
-                .message
+            let has_tool_calls = response
+                .assistant
                 .tool_calls
                 .as_ref()
                 .map(|tool_calls| !tool_calls.is_empty())
                 .unwrap_or(false);
 
             self.messages.push(Message::Assistant {
-                content: choice.message.content.clone(),
-                reasoning_content: choice.message.reasoning_content.clone(),
-                tool_calls: choice.message.tool_calls.clone(),
+                content: response.assistant.content.clone(),
+                reasoning_text: response.assistant.reasoning_text.clone(),
+                reasoning_details: response.assistant.reasoning_details.clone(),
+                tool_calls: response.assistant.tool_calls.clone(),
             });
 
             if !has_tool_calls {
-                let content = choice
-                    .message
+                let content = response
+                    .assistant
                     .content
                     .unwrap_or_else(|| "[No response]".to_string());
                 self.emit(AgentEvent::AssistantMessage {
@@ -300,7 +289,7 @@ impl Agent {
                 return Ok(content);
             }
 
-            let tool_calls = choice.message.tool_calls.unwrap_or_default();
+            let tool_calls = response.assistant.tool_calls.unwrap_or_default();
             let results = execute_tools_parallel(
                 tool_calls,
                 self.tool_runtime.clone(),
@@ -342,7 +331,7 @@ impl Agent {
 async fn execute_tools_parallel(
     tool_calls: Vec<ToolCall>,
     runtime: ToolRuntime,
-    client: OpenAiClient,
+    client: ModelClient,
     event_sink: EventSink,
     thread_name: Option<String>,
 ) -> Vec<(String, String, ToolResult)> {
@@ -434,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_agent_creation() {
-        let client = OpenAiClient::new_for_test();
+        let client = ModelClient::new_for_test();
         let agent = Agent::default(client);
         assert!(!agent.messages.is_empty());
         assert!(!agent.tool_defs.is_empty());
@@ -442,7 +431,7 @@ mod tests {
 
     #[test]
     fn worker_surfaces_skills_but_orchestrator_does_not() {
-        let client = OpenAiClient::new_for_test();
+        let client = ModelClient::new_for_test();
         let registry = Arc::new(crate::skills::SkillRegistry::load_for_test(vec![
             crate::skills::SkillRecord {
                 name: "lint".to_string(),

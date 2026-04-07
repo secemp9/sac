@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use crate::api::{detect_backend, BackendKind, ReasoningEffort};
 use crate::paths::nac_sessions_path;
 use crate::sandbox::SandboxSpec;
 use crate::types::Message;
@@ -15,6 +16,8 @@ pub struct SessionSnapshot {
     pub store_path: PathBuf,
     pub model: String,
     pub base_url: String,
+    pub backend: BackendKind,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub sandbox_spec: Option<SandboxSpec>,
     pub messages: Vec<Message>,
     pub created_at: String,
@@ -74,7 +77,7 @@ pub fn load_session(session_id: &str) -> Result<SessionSnapshot> {
     let conn = open_connection(&path)?;
     let row = conn
         .query_row(
-            "SELECT session_id, cwd, store_path, model, base_url, sandbox_json, messages_json, created_at, updated_at
+            "SELECT session_id, cwd, store_path, model, base_url, backend, reasoning_effort, sandbox_json, messages_json, created_at, updated_at
              FROM sessions
              WHERE session_id = ?1",
             params![session_id],
@@ -85,10 +88,12 @@ pub fn load_session(session_id: &str) -> Result<SessionSnapshot> {
                     store_path: row.get(2)?,
                     model: row.get(3)?,
                     base_url: row.get(4)?,
-                    sandbox_json: row.get(5)?,
-                    messages_json: row.get(6)?,
-                    created_at: row.get(7)?,
-                    updated_at: row.get(8)?,
+                    backend: row.get(5)?,
+                    reasoning_effort: row.get(6)?,
+                    sandbox_json: row.get(7)?,
+                    messages_json: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
                 })
             },
         )
@@ -106,7 +111,7 @@ pub fn load_last_session() -> Result<SessionSnapshot> {
     let conn = open_connection(&path)?;
     let row = conn
         .query_row(
-            "SELECT session_id, cwd, store_path, model, base_url, sandbox_json, messages_json, created_at, updated_at
+            "SELECT session_id, cwd, store_path, model, base_url, backend, reasoning_effort, sandbox_json, messages_json, created_at, updated_at
              FROM sessions
              ORDER BY updated_at DESC, created_at DESC
              LIMIT 1",
@@ -118,10 +123,12 @@ pub fn load_last_session() -> Result<SessionSnapshot> {
                     store_path: row.get(2)?,
                     model: row.get(3)?,
                     base_url: row.get(4)?,
-                    sandbox_json: row.get(5)?,
-                    messages_json: row.get(6)?,
-                    created_at: row.get(7)?,
-                    updated_at: row.get(8)?,
+                    backend: row.get(5)?,
+                    reasoning_effort: row.get(6)?,
+                    sandbox_json: row.get(7)?,
+                    messages_json: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
                 })
             },
         )
@@ -154,6 +161,8 @@ fn open_connection(path: &Path) -> Result<Connection> {
              store_path TEXT NOT NULL,
              model TEXT NOT NULL,
              base_url TEXT NOT NULL,
+             backend TEXT,
+             reasoning_effort TEXT,
              sandbox_json TEXT,
              messages_json TEXT NOT NULL,
              created_at TEXT NOT NULL,
@@ -162,6 +171,8 @@ fn open_connection(path: &Path) -> Result<Connection> {
          CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
              ON sessions(updated_at DESC);",
     )?;
+    ensure_column(&conn, "sessions", "backend", "TEXT")?;
+    ensure_column(&conn, "sessions", "reasoning_effort", "TEXT")?;
     Ok(conn)
 }
 
@@ -179,13 +190,15 @@ fn insert_or_replace_session(
 
     tx.execute(
         "INSERT INTO sessions (
-             session_id, cwd, store_path, model, base_url, sandbox_json, messages_json, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             session_id, cwd, store_path, model, base_url, backend, reasoning_effort, sandbox_json, messages_json, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(session_id) DO UPDATE SET
              cwd = excluded.cwd,
              store_path = excluded.store_path,
              model = excluded.model,
              base_url = excluded.base_url,
+             backend = excluded.backend,
+             reasoning_effort = excluded.reasoning_effort,
              sandbox_json = excluded.sandbox_json,
              messages_json = excluded.messages_json,
              updated_at = excluded.updated_at",
@@ -195,6 +208,8 @@ fn insert_or_replace_session(
             snapshot.store_path.display().to_string(),
             snapshot.model,
             snapshot.base_url,
+            snapshot.backend.as_str(),
+            snapshot.reasoning_effort.map(|effort| effort.as_str().to_string()),
             sandbox_json,
             messages_json,
             snapshot.created_at,
@@ -300,6 +315,8 @@ pub fn new_snapshot(
     store_path: PathBuf,
     model: String,
     base_url: String,
+    backend: BackendKind,
+    reasoning_effort: Option<ReasoningEffort>,
     sandbox_spec: Option<SandboxSpec>,
     messages: Vec<Message>,
 ) -> SessionSnapshot {
@@ -310,6 +327,8 @@ pub fn new_snapshot(
         store_path,
         model,
         base_url,
+        backend,
+        reasoning_effort,
         sandbox_spec,
         messages,
         created_at: now.clone(),
@@ -324,6 +343,8 @@ pub fn refresh_snapshot(snapshot: &SessionSnapshot, messages: Vec<Message>) -> S
         store_path: snapshot.store_path.clone(),
         model: snapshot.model.clone(),
         base_url: snapshot.base_url.clone(),
+        backend: snapshot.backend,
+        reasoning_effort: snapshot.reasoning_effort,
         sandbox_spec: snapshot.sandbox_spec.clone(),
         messages,
         created_at: snapshot.created_at.clone(),
@@ -337,6 +358,8 @@ struct SessionRow {
     store_path: String,
     model: String,
     base_url: String,
+    backend: Option<String>,
+    reasoning_effort: Option<String>,
     sandbox_json: Option<String>,
     messages_json: String,
     created_at: String,
@@ -347,17 +370,43 @@ impl SessionRow {
     fn into_snapshot(self) -> Result<SessionSnapshot> {
         let messages = serde_json::from_str(&self.messages_json)
             .context("failed to parse stored session messages")?;
+        let base_url = self.base_url;
+        let backend = parse_backend(self.backend, &base_url)?;
         Ok(SessionSnapshot {
             session_id: self.session_id,
             cwd: PathBuf::from(self.cwd),
             store_path: PathBuf::from(self.store_path),
             model: self.model,
-            base_url: self.base_url,
+            base_url,
+            backend,
+            reasoning_effort: parse_reasoning_effort(self.reasoning_effort)?,
             sandbox_spec: deserialize_sandbox(self.sandbox_json)?,
             messages,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
+    }
+}
+
+fn parse_backend(raw: Option<String>, base_url: &str) -> Result<BackendKind> {
+    match raw.as_deref() {
+        Some("fireworks-chat") => Ok(BackendKind::FireworksChat),
+        Some("openai-responses") => Ok(BackendKind::OpenAiResponses),
+        Some(other) => Err(anyhow!("unsupported stored backend '{}'", other)),
+        None => detect_backend(base_url),
+    }
+}
+
+fn parse_reasoning_effort(raw: Option<String>) -> Result<Option<ReasoningEffort>> {
+    match raw.as_deref() {
+        Some("none") => Ok(Some(ReasoningEffort::None)),
+        Some("minimal") => Ok(Some(ReasoningEffort::Minimal)),
+        Some("low") => Ok(Some(ReasoningEffort::Low)),
+        Some("medium") => Ok(Some(ReasoningEffort::Medium)),
+        Some("high") => Ok(Some(ReasoningEffort::High)),
+        Some("xhigh") => Ok(Some(ReasoningEffort::Xhigh)),
+        Some(other) => Err(anyhow!("unsupported stored reasoning effort '{}'", other)),
+        None => Ok(None),
     }
 }
 
@@ -391,7 +440,9 @@ mod tests {
             PathBuf::from("/repo"),
             PathBuf::from("/repo/.nac/store.db"),
             "model-a".to_string(),
-            "https://example.com/v1".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            BackendKind::OpenAiResponses,
+            Some(ReasoningEffort::Xhigh),
             None,
             vec![Message::User {
                 content: "hello".to_string(),
@@ -424,7 +475,9 @@ mod tests {
             PathBuf::from("/repo-one"),
             PathBuf::from("/repo-one/.nac/store.db"),
             "model-a".to_string(),
-            "https://example.com/v1".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            BackendKind::OpenAiResponses,
+            Some(ReasoningEffort::Xhigh),
             None,
             Vec::new(),
         );
@@ -435,7 +488,9 @@ mod tests {
             PathBuf::from("/repo-two"),
             PathBuf::from("/repo-two/.nac/store.db"),
             "model-b".to_string(),
-            "https://example.com/v1".to_string(),
+            "https://api.fireworks.ai/inference/v1".to_string(),
+            BackendKind::FireworksChat,
+            None,
             None,
             vec![Message::User {
                 content: "latest".to_string(),
@@ -452,4 +507,18 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(home);
     }
+}
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    let pragma = format!("PRAGMA table_info({})", table);
+    let mut stmt = conn.prepare(&pragma)?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+
+    let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, definition);
+    conn.execute(&alter, [])?;
+    Ok(())
 }

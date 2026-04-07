@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use nac::agent::{Agent, AgentConfig, AgentMode};
 use nac::agents_md::AgentsMdBundle;
-use nac::api::OpenAiClient;
+use nac::api::{BackendKind, ClientOverrides, ModelClient, ReasoningEffort};
 use nac::events::EventSink;
 use nac::mcp::McpRegistry;
 use nac::sandbox::{
@@ -67,6 +67,14 @@ struct RunCli {
     #[arg(long)]
     sandbox: bool,
 
+    /// Backend wire shape to use for model requests
+    #[arg(long, value_enum, default_value_t = BackendKind::Auto)]
+    backend: BackendKind,
+
+    /// Reasoning effort to request when supported by the selected backend
+    #[arg(long, value_enum)]
+    reasoning_effort: Option<ReasoningEffort>,
+
     /// Disable the implicit current-directory mount into /workspace
     #[arg(long)]
     no_mount_cwd: bool,
@@ -90,6 +98,14 @@ struct RunCli {
     /// Internal sandbox workdir used for worker subprocesses
     #[arg(long, hide = true)]
     sandbox_workdir: Option<String>,
+
+    /// Internal API base URL override used by managed workers and resume
+    #[arg(long, hide = true)]
+    api_base_url: Option<String>,
+
+    /// Internal model override used by managed workers and resume
+    #[arg(long, hide = true)]
+    api_model: Option<String>,
 }
 
 #[derive(Parser)]
@@ -121,7 +137,7 @@ struct RunConfig {
     initial_prompt: Option<String>,
     continue_repl: bool,
     managed_worker: Option<ManagedWorkerConfig>,
-    client: OpenAiClient,
+    client: ModelClient,
     session_id: Option<String>,
     session_snapshot: Option<SessionSnapshot>,
     sandbox_status: String,
@@ -255,7 +271,12 @@ async fn build_run_config(cli: ParsedCli) -> Result<RunConfig> {
 }
 
 async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
-    let client = OpenAiClient::from_env()?;
+    let client = ModelClient::from_env_with_overrides(ClientOverrides {
+        base_url: cli.api_base_url.clone(),
+        model: cli.api_model.clone(),
+        backend: Some(cli.backend),
+        reasoning_effort: cli.reasoning_effort,
+    })?;
     let current_dir = std::env::current_dir()?;
     let sandbox = build_sandbox_session(&cli, &current_dir).await?;
     let agents_md_workspace_dir = effective_agents_md_workspace_dir(&current_dir, sandbox.as_ref());
@@ -432,6 +453,8 @@ async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
         store_path,
         client.model.clone(),
         client.base_url().to_string(),
+        client.backend(),
+        client.reasoning_effort(),
         sandbox.as_ref().map(|session| session.spec().clone()),
         agent.messages.clone(),
     );
@@ -464,10 +487,12 @@ async fn build_resume_config(cli: ResumeCli) -> Result<RunConfig> {
 
     std::env::set_current_dir(&snapshot.cwd)?;
     let current_dir = std::env::current_dir()?;
-    let client = OpenAiClient::from_env_with_overrides(
-        Some(snapshot.base_url.clone()),
-        Some(snapshot.model.clone()),
-    )?;
+    let client = ModelClient::from_env_with_overrides(ClientOverrides {
+        base_url: Some(snapshot.base_url.clone()),
+        model: Some(snapshot.model.clone()),
+        backend: Some(snapshot.backend),
+        reasoning_effort: snapshot.reasoning_effort,
+    })?;
     let sandbox = match snapshot.sandbox_spec.clone() {
         Some(spec) => Some(SandboxSession::create(spec, Uuid::new_v4().to_string(), true).await?),
         None => None,
@@ -761,12 +786,16 @@ mod tests {
             source_threads: vec!["auth".to_string(), "tests".to_string()],
             store_path: Some(store_path.clone()),
             sandbox: false,
+            backend: BackendKind::Auto,
+            reasoning_effort: None,
             no_mount_cwd: false,
             mounts: Vec::new(),
             mounts_ro: Vec::new(),
             sandbox_image: DEFAULT_SANDBOX_IMAGE.to_string(),
             sandbox_session_key: None,
             sandbox_workdir: None,
+            api_base_url: None,
+            api_model: None,
         };
 
         let run_config = build_run_cli_config(cli).await.unwrap();
@@ -846,12 +875,16 @@ mod tests {
             source_threads: Vec::new(),
             store_path: Some(store_path.clone()),
             sandbox: false,
+            backend: BackendKind::Auto,
+            reasoning_effort: None,
             no_mount_cwd: false,
             mounts: Vec::new(),
             mounts_ro: Vec::new(),
             sandbox_image: DEFAULT_SANDBOX_IMAGE.to_string(),
             sandbox_session_key: None,
             sandbox_workdir: None,
+            api_base_url: None,
+            api_model: None,
         };
 
         let run_config = build_run_cli_config(cli).await.unwrap();
@@ -910,7 +943,9 @@ mod tests {
             session_cwd.clone(),
             session_cwd.join(".nac/store.db"),
             "resume-model".to_string(),
-            "https://example.com/v1".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            BackendKind::OpenAiResponses,
+            Some(ReasoningEffort::Xhigh),
             None,
             vec![
                 Message::System {
@@ -921,7 +956,8 @@ mod tests {
                 },
                 Message::Assistant {
                     content: Some("world".to_string()),
-                    reasoning_content: Some("hidden thinking".to_string()),
+                    reasoning_text: Some("hidden thinking".to_string()),
+                    reasoning_details: None,
                     tool_calls: None,
                 },
             ],
@@ -950,7 +986,7 @@ mod tests {
         match &run_config.agent.messages[2] {
             Message::Assistant {
                 content: Some(content),
-                reasoning_content: Some(reasoning),
+                reasoning_text: Some(reasoning),
                 ..
             } => {
                 assert_eq!(content, "world");

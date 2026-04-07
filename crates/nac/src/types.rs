@@ -24,8 +24,14 @@ pub enum Message {
     Assistant {
         #[serde(serialize_with = "serialize_nullable_content")]
         content: Option<String>,
+        #[serde(
+            default,
+            alias = "reasoning_content",
+            skip_serializing_if = "Option::is_none"
+        )]
+        reasoning_text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning_content: Option<String>,
+        reasoning_details: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
     },
@@ -64,44 +70,12 @@ pub struct FunctionDef {
     pub parameters: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ToolDefinition>,
-    pub temperature: f32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChatResponse {
-    pub id: String,
-    pub choices: Vec<Choice>,
-    #[serde(default)]
-    pub usage: Option<Usage>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Choice {
-    pub message: ResponseMessage,
-    pub finish_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ResponseMessage {
-    pub role: String,
-    pub content: Option<String>,
-    #[serde(default)]
-    pub reasoning_content: Option<String>,
-    #[serde(default)]
-    pub tool_calls: Option<Vec<ToolCall>>,
-}
-
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Usage {
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
     pub total_tokens: Option<u32>,
+    pub reasoning_tokens: Option<u32>,
 }
 
 #[cfg(test)]
@@ -112,7 +86,8 @@ mod tests {
     fn test_assistant_content_null() {
         let msg = Message::Assistant {
             content: None,
-            reasoning_content: Some("thinking".to_string()),
+            reasoning_text: Some("thinking".to_string()),
+            reasoning_details: Some(serde_json::json!([{"type": "reasoning"}])),
             tool_calls: Some(vec![ToolCall {
                 id: "call_123".to_string(),
                 call_type: "function".to_string(),
@@ -134,10 +109,44 @@ mod tests {
             json
         );
         assert!(
-            json.contains("\"reasoning_content\":\"thinking\""),
-            "Expected reasoning_content in JSON: {}",
+            json.contains("\"reasoning_text\":\"thinking\""),
+            "Expected reasoning_text in JSON: {}",
             json
         );
+        assert!(
+            json.contains("\"reasoning_details\":[{\"type\":\"reasoning\"}]"),
+            "Expected reasoning_details in JSON: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_assistant_reasoning_content_alias_deserializes() {
+        let json = r#"{
+            "role":"assistant",
+            "content":"hello",
+            "reasoning_content":"thinking",
+            "tool_calls":[]
+        }"#;
+        let parsed: Message = serde_json::from_str(json).unwrap();
+        match parsed {
+            Message::Assistant {
+                content,
+                reasoning_text,
+                reasoning_details,
+                tool_calls,
+            } => {
+                assert_eq!(content.as_deref(), Some("hello"));
+                assert_eq!(reasoning_text.as_deref(), Some("thinking"));
+                assert_eq!(reasoning_details, None);
+                assert_eq!(
+                    tool_calls.as_ref().map(std::vec::Vec::len),
+                    Some(0),
+                    "expected empty tool call list"
+                );
+            }
+            other => panic!("expected assistant message, got {:?}", other),
+        }
     }
 
     #[test]
