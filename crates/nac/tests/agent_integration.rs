@@ -1,9 +1,9 @@
-use nac::{agent::Agent, api::OpenAiClient};
+use nac::{agent::Agent, api::ModelClient};
 
 #[tokio::test]
 #[ignore = "requires OPENAI_API_KEY"]
 async fn test_simple_prompt() {
-    let client = OpenAiClient::from_env().expect("Need OPENAI_API_KEY");
+    let client = ModelClient::from_env().expect("Need OPENAI_API_KEY");
     let mut agent = Agent::new(client);
     let result = agent.send("What is 2+2? Reply with just the number.").await;
 
@@ -26,7 +26,7 @@ async fn test_tool_usage() {
     let path = std::env::temp_dir().join(format!("agent_task5_test_{}.txt", unique));
     std::fs::write(&path, "hello from test file").expect("failed to create temp file");
 
-    let client = OpenAiClient::from_env().expect("Need OPENAI_API_KEY");
+    let client = ModelClient::from_env().expect("Need OPENAI_API_KEY");
     let mut agent = Agent::new(client);
     let result = agent
         .send(&format!(

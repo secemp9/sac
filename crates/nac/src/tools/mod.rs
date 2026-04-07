@@ -157,7 +157,7 @@ pub async fn execute_tool(
     name: &str,
     args: Value,
     runtime: &ToolRuntime,
-    _client: &crate::api::OpenAiClient,
+    client: &crate::api::ModelClient,
 ) -> ToolResult {
     if name.starts_with("mcp__") {
         let Some(registry) = &runtime.mcp else {
@@ -175,7 +175,7 @@ pub async fn execute_tool(
         "write" => write::execute(args, runtime).await,
         "edit" => edit::execute(args, runtime).await,
         "bash" => bash::execute(args, runtime).await,
-        "thread" => thread::execute_dispatch(args, runtime).await,
+        "thread" => thread::execute_dispatch(args, runtime, client).await,
         "threads" => thread::execute_threads(runtime).await,
         "thread_read" => thread::execute_thread_read(args, runtime).await,
         "thread_delete" => thread::execute_thread_delete(args, runtime).await,

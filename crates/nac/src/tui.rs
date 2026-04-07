@@ -39,6 +39,8 @@ pub struct TuiMetadata {
     pub cwd: String,
     pub model: String,
     pub base_url: String,
+    pub backend: String,
+    pub reasoning_effort: Option<String>,
     pub session_id: Option<String>,
     pub sandbox_status: String,
     pub agents_md_status: String,
@@ -672,6 +674,14 @@ fn print_preamble(terminal: &mut UiTerminal, metadata: &TuiMetadata) -> Result<(
             .compact()
             .symbol("●"),
     )?;
+    if let Some(reasoning_effort) = metadata.reasoning_effort.as_deref() {
+        print_entry(
+            terminal,
+            &UiEntry::new(EntryKind::Log, "effort:", reasoning_effort)
+                .compact()
+                .symbol("●"),
+        )?;
+    }
     print_entry(
         terminal,
         &UiEntry::new(
@@ -684,7 +694,13 @@ fn print_preamble(terminal: &mut UiTerminal, metadata: &TuiMetadata) -> Result<(
     )?;
     print_entry(
         terminal,
-        &UiEntry::new(EntryKind::Log, "SANDBOX:", metadata.sandbox_status.clone())
+        &UiEntry::new(EntryKind::Log, "backend:", metadata.backend.clone())
+            .compact()
+            .symbol("●"),
+    )?;
+    print_entry(
+        terminal,
+        &UiEntry::new(EntryKind::Log, "sandbox:", metadata.sandbox_status.clone())
             .compact()
             .symbol("●"),
     )?;

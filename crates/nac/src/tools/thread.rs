@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::api::ModelClient;
 use crate::events::{decode_stderr_event, AgentEvent};
 use crate::store;
 use crate::tools::{require_str, require_string_array, ToolResult, ToolRuntime};
@@ -74,7 +75,11 @@ pub fn thread_delete_definition() -> ToolDefinition {
     )
 }
 
-pub async fn execute_dispatch(args: Value, runtime: &ToolRuntime) -> ToolResult {
+pub async fn execute_dispatch(
+    args: Value,
+    runtime: &ToolRuntime,
+    client: &ModelClient,
+) -> ToolResult {
     let thread_name = match require_str(&args, "name") {
         Ok(s) => s,
         Err(e) => return e,
@@ -115,6 +120,7 @@ pub async fn execute_dispatch(args: Value, runtime: &ToolRuntime) -> ToolResult 
 
     let result = run_worker(
         runtime,
+        client,
         &session_id,
         &thread_name,
         &action,
@@ -324,6 +330,7 @@ struct WorkerRun {
 
 async fn run_worker(
     runtime: &ToolRuntime,
+    client: &ModelClient,
     session_id: &str,
     thread_name: &str,
     action: &str,
@@ -340,10 +347,20 @@ async fn run_worker(
         .arg(thread_name)
         .arg("--action")
         .arg(action)
+        .arg("--api-model")
+        .arg(client.model.as_str())
+        .arg("--api-base-url")
+        .arg(client.base_url())
+        .arg("--backend")
+        .arg(client.backend().as_str())
         .arg("--store-path")
         .arg(runtime.store_path.as_os_str())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    if let Some(reasoning_effort) = client.reasoning_effort() {
+        command.arg("--effort").arg(reasoning_effort.as_str());
+    }
 
     for source_thread in source_threads {
         command.arg("--source-thread").arg(source_thread);
