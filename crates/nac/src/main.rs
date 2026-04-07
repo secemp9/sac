@@ -72,7 +72,7 @@ struct RunCli {
     backend: BackendKind,
 
     /// Reasoning effort to request when supported by the selected backend
-    #[arg(long, value_enum)]
+    #[arg(long = "effort", value_enum)]
     reasoning_effort: Option<ReasoningEffort>,
 
     /// Disable the implicit current-directory mount into /workspace
@@ -180,6 +180,15 @@ async fn run() -> Result<()> {
                 .unwrap_or_else(|_| ".".to_string()),
             model: run_config.client.model.clone(),
             base_url: run_config.client.base_url().to_string(),
+            backend: run_config.client.backend().as_str().to_string(),
+            reasoning_effort: if run_config.client.backend() == BackendKind::OpenAiResponses {
+                run_config
+                    .client
+                    .reasoning_effort()
+                    .map(|effort| effort.as_str().to_string())
+            } else {
+                None
+            },
             session_id: run_config.session_id.clone(),
             sandbox_status: run_config.sandbox_status.clone(),
             agents_md_status: run_config.agents_md_status.clone(),

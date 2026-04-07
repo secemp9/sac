@@ -359,9 +359,7 @@ async fn run_worker(
         .stderr(Stdio::piped());
 
     if let Some(reasoning_effort) = client.reasoning_effort() {
-        command
-            .arg("--reasoning-effort")
-            .arg(reasoning_effort.as_str());
+        command.arg("--effort").arg(reasoning_effort.as_str());
     }
 
     for source_thread in source_threads {
