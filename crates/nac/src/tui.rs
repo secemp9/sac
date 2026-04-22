@@ -404,6 +404,7 @@ struct LifeField {
     height: usize,
     cells: Vec<bool>,
     low_activity_ticks: usize,
+    injection_phase: usize,
 }
 
 struct App {
@@ -1084,7 +1085,7 @@ impl App {
     }
 
     fn advance_life(&mut self) {
-        self.life_field.step(self.working_frame as u64 + 1);
+        self.life_field.step();
     }
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
@@ -1811,11 +1812,8 @@ impl App {
         }
 
         if matches!(self.send_state, SendState::Pending) {
-            self.life_field.ensure_size(
-                inner.width as usize * 2,
-                inner.height as usize * 4,
-                self.working_frame as u64,
-            );
+            self.life_field
+                .ensure_size(inner.width as usize * 2, inner.height as usize * 4);
             let lines = self
                 .life_field
                 .render_lines(inner.width as usize, inner.height as usize);
@@ -2286,7 +2284,7 @@ fn render_lines_panel_with_title(
 }
 
 impl LifeField {
-    fn ensure_size(&mut self, width: usize, height: usize, seed: u64) {
+    fn ensure_size(&mut self, width: usize, height: usize) {
         let width = width.max(2);
         let height = height.max(4);
         if self.width == width && self.height == height && !self.cells.is_empty() {
@@ -2295,11 +2293,12 @@ impl LifeField {
 
         self.width = width;
         self.height = height;
-        self.cells = seed_life_cells(width, height, seed);
+        self.cells = seed_life_cells(width, height);
         self.low_activity_ticks = 0;
+        self.injection_phase = 0;
     }
 
-    fn step(&mut self, seed: u64) {
+    fn step(&mut self) {
         if self.width == 0 || self.height == 0 || self.cells.is_empty() {
             return;
         }
@@ -2321,7 +2320,8 @@ impl LifeField {
 
         self.cells = if alive == 0 {
             self.low_activity_ticks = 0;
-            seed_life_cells(self.width, self.height, seed)
+            self.injection_phase = 0;
+            seed_life_cells(self.width, self.height)
         } else {
             let low_activity_threshold = (self.width * self.height / 384).max(6);
             if changed <= low_activity_threshold {
@@ -2330,9 +2330,11 @@ impl LifeField {
                 self.low_activity_ticks = 0;
             }
 
-            if self.low_activity_ticks >= 24 {
-                inject_sparse_center_patch(&mut next, self.width, self.height, seed);
-                self.low_activity_ticks = 0;
+            if self.low_activity_ticks >= 16 {
+                inject_showcase_layout(&mut next, self.width, self.height, self.injection_phase);
+                self.injection_phase =
+                    (self.injection_phase + 1) % LIFE_INJECTION_LAYOUTS.len().max(1);
+                self.low_activity_ticks = 4;
             }
 
             next
@@ -2399,71 +2401,258 @@ impl LifeField {
     }
 }
 
-fn seed_life_cells(width: usize, height: usize, seed: u64) -> Vec<bool> {
+fn seed_life_cells(width: usize, height: usize) -> Vec<bool> {
     let mut cells = vec![false; width.saturating_mul(height)];
     if width == 0 || height == 0 {
         return cells;
     }
 
-    let cx = width.saturating_sub(1) as u64;
-    let cy = height.saturating_sub(1) as u64;
-    let max_dist = (cx * cx + cy * cy * 2).max(1);
-
-    for y in 0..height {
-        for x in 0..width {
-            let dx = (2 * x as u64).abs_diff(cx);
-            let dy = (2 * y as u64).abs_diff(cy);
-            let dist = (dx * dx + dy * dy * 2).min(max_dist);
-            let bias = max_dist - dist;
-            let threshold = 35 + (bias * 325 / max_dist);
-            let noise = splitmix64(seed ^ ((x as u64) << 32) ^ y as u64) % 1000;
-            cells[y * width + x] = noise < threshold;
-        }
-    }
-
-    if !cells.iter().any(|alive| *alive) {
-        let mid_x = width / 2;
-        let mid_y = height / 2;
-        for (dx, dy) in [(0usize, 0usize), (1, 0), (2, 0), (2, 1), (1, 2)] {
-            let x = (mid_x + dx).min(width.saturating_sub(1));
-            let y = (mid_y + dy).min(height.saturating_sub(1));
-            cells[y * width + x] = true;
-        }
-    }
+    inject_showcase_layout(&mut cells, width, height, 0);
 
     cells
 }
 
-fn inject_sparse_center_patch(cells: &mut [bool], width: usize, height: usize, seed: u64) {
+fn inject_showcase_layout(cells: &mut [bool], width: usize, height: usize, phase: usize) {
     if width == 0 || height == 0 || cells.is_empty() {
+        return;
+    }
+
+    let layouts_len = LIFE_INJECTION_LAYOUTS.len();
+    if layouts_len == 0 {
+        return;
+    }
+
+    for placement in LIFE_INJECTION_LAYOUTS[phase % layouts_len] {
+        inject_pattern(cells, width, height, *placement);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SeedPattern {
+    width: usize,
+    height: usize,
+    cells: &'static [(usize, usize)],
+}
+
+#[derive(Clone, Copy)]
+struct PatternPlacement {
+    pattern: SeedPattern,
+    dx: isize,
+    dy: isize,
+    rotation: u8,
+    flip: bool,
+}
+
+const GLIDER_PATTERN: SeedPattern = SeedPattern {
+    width: 3,
+    height: 3,
+    cells: &[(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)],
+};
+
+const R_PENTOMINO_PATTERN: SeedPattern = SeedPattern {
+    width: 3,
+    height: 3,
+    cells: &[(1, 0), (2, 0), (0, 1), (1, 1), (1, 2)],
+};
+
+const ACORN_PATTERN: SeedPattern = SeedPattern {
+    width: 7,
+    height: 3,
+    cells: &[(1, 0), (3, 1), (0, 2), (1, 2), (4, 2), (5, 2), (6, 2)],
+};
+
+const LWSS_PATTERN: SeedPattern = SeedPattern {
+    width: 5,
+    height: 4,
+    cells: &[
+        (1, 0),
+        (2, 0),
+        (3, 0),
+        (4, 0),
+        (0, 1),
+        (4, 1),
+        (4, 2),
+        (0, 3),
+        (3, 3),
+    ],
+};
+
+const LIFE_LAYOUT_WIDTH_SCALE: isize = 5;
+
+const LIFE_INJECTION_LAYOUTS: &[&[PatternPlacement]] = &[
+    &[
+        PatternPlacement {
+            pattern: GLIDER_PATTERN,
+            dx: -14,
+            dy: -8,
+            rotation: 0,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: GLIDER_PATTERN,
+            dx: 14,
+            dy: -8,
+            rotation: 1,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: GLIDER_PATTERN,
+            dx: -14,
+            dy: 8,
+            rotation: 3,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: GLIDER_PATTERN,
+            dx: 14,
+            dy: 8,
+            rotation: 2,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: ACORN_PATTERN,
+            dx: 0,
+            dy: -1,
+            rotation: 0,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: R_PENTOMINO_PATTERN,
+            dx: -5,
+            dy: 4,
+            rotation: 0,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: R_PENTOMINO_PATTERN,
+            dx: 5,
+            dy: 4,
+            rotation: 2,
+            flip: true,
+        },
+    ],
+    &[
+        PatternPlacement {
+            pattern: LWSS_PATTERN,
+            dx: -18,
+            dy: -6,
+            rotation: 0,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: LWSS_PATTERN,
+            dx: 18,
+            dy: 6,
+            rotation: 2,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: ACORN_PATTERN,
+            dx: -8,
+            dy: 0,
+            rotation: 1,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: ACORN_PATTERN,
+            dx: 8,
+            dy: 0,
+            rotation: 3,
+            flip: true,
+        },
+        PatternPlacement {
+            pattern: GLIDER_PATTERN,
+            dx: 0,
+            dy: -12,
+            rotation: 0,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: GLIDER_PATTERN,
+            dx: 0,
+            dy: 12,
+            rotation: 2,
+            flip: false,
+        },
+    ],
+    &[
+        PatternPlacement {
+            pattern: R_PENTOMINO_PATTERN,
+            dx: -10,
+            dy: -4,
+            rotation: 0,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: R_PENTOMINO_PATTERN,
+            dx: 10,
+            dy: -4,
+            rotation: 1,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: R_PENTOMINO_PATTERN,
+            dx: -10,
+            dy: 4,
+            rotation: 3,
+            flip: true,
+        },
+        PatternPlacement {
+            pattern: R_PENTOMINO_PATTERN,
+            dx: 10,
+            dy: 4,
+            rotation: 2,
+            flip: true,
+        },
+        PatternPlacement {
+            pattern: LWSS_PATTERN,
+            dx: 0,
+            dy: -10,
+            rotation: 1,
+            flip: false,
+        },
+        PatternPlacement {
+            pattern: LWSS_PATTERN,
+            dx: 0,
+            dy: 10,
+            rotation: 3,
+            flip: false,
+        },
+    ],
+];
+
+fn inject_pattern(cells: &mut [bool], width: usize, height: usize, placement: PatternPlacement) {
+    if width == 0 || height == 0 {
         return;
     }
 
     let center_x = (width / 2) as isize;
     let center_y = (height / 2) as isize;
-    let radius_x = (width / 7).max(3) as isize;
-    let radius_y = (height / 7).max(3) as isize;
-    let patch_count = ((width * height) / 640).clamp(10, 28);
+    let anchor_x = center_x + placement.dx.saturating_mul(LIFE_LAYOUT_WIDTH_SCALE);
+    let anchor_y = center_y + placement.dy;
+    let (placed_width, placed_height) = rotated_dimensions(
+        placement.pattern.width,
+        placement.pattern.height,
+        placement.rotation,
+    );
+    let origin_x = anchor_x - placed_width as isize / 2;
+    let origin_y = anchor_y - placed_height as isize / 2;
 
-    for index in 0..patch_count {
-        let salt = seed ^ ((index as u64 + 1) * 0x9e3779b97f4a7c15);
-        let dx = sample_center_biased_offset(salt, radius_x);
-        let dy = sample_center_biased_offset(salt ^ 0xbf58476d1ce4e5b9, radius_y);
-        let x = (center_x + dx).clamp(0, width.saturating_sub(1) as isize) as usize;
-        let y = (center_y + dy).clamp(0, height.saturating_sub(1) as isize) as usize;
-        cells[y * width + x] = true;
+    for &(x, y) in placement.pattern.cells {
+        let (mut px, py) = rotate_cell(
+            x,
+            y,
+            placement.pattern.width,
+            placement.pattern.height,
+            placement.rotation,
+        );
+        if placement.flip {
+            px = placed_width.saturating_sub(1).saturating_sub(px);
+        }
+        let world_x = wrap_index_signed(origin_x + px as isize, width);
+        let world_y = wrap_index_signed(origin_y + py as isize, height);
+        cells[world_y * width + world_x] = true;
     }
-}
-
-fn sample_center_biased_offset(seed: u64, radius: isize) -> isize {
-    if radius <= 0 {
-        return 0;
-    }
-
-    let span = radius as u64 + 1;
-    let left = (splitmix64(seed) % span) as isize;
-    let right = (splitmix64(seed ^ 0x94d049bb133111eb) % span) as isize;
-    left - right
 }
 
 fn wrap_index(index: usize, delta: isize, len: usize) -> usize {
@@ -2473,11 +2662,31 @@ fn wrap_index(index: usize, delta: isize, len: usize) -> usize {
     ((index as isize + delta).rem_euclid(len as isize)) as usize
 }
 
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e3779b97f4a7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
-    value ^ (value >> 31)
+fn wrap_index_signed(index: isize, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    index.rem_euclid(len as isize) as usize
+}
+
+fn rotated_dimensions(width: usize, height: usize, rotation: u8) -> (usize, usize) {
+    if rotation % 2 == 0 {
+        (width, height)
+    } else {
+        (height, width)
+    }
+}
+
+fn rotate_cell(x: usize, y: usize, width: usize, height: usize, rotation: u8) -> (usize, usize) {
+    match rotation % 4 {
+        0 => (x, y),
+        1 => (height.saturating_sub(1).saturating_sub(y), x),
+        2 => (
+            width.saturating_sub(1).saturating_sub(x),
+            height.saturating_sub(1).saturating_sub(y),
+        ),
+        _ => (y, width.saturating_sub(1).saturating_sub(x)),
+    }
 }
 
 fn render_event_line(entry: &TimelineEntry, width: usize) -> Line<'static> {
