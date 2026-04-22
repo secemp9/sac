@@ -403,6 +403,19 @@ struct SelectionState {
     dragging: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenMode {
+    Dashboard,
+    SessionPicker { startup: bool },
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionPickerState {
+    sessions: Vec<sessions::SessionSummary>,
+    selected: usize,
+    error: Option<String>,
+}
+
 struct App {
     metadata: TuiMetadata,
     inspect_root: Option<PathBuf>,
@@ -428,10 +441,16 @@ struct App {
     panel_scrolls: HashMap<PanelId, usize>,
     panel_views: HashMap<PanelId, PanelView>,
     selection: Option<SelectionState>,
+    screen: ScreenMode,
+    session_picker: SessionPickerState,
 }
 
 impl App {
-    fn new(metadata: TuiMetadata, restored_messages: &[Message]) -> Self {
+    fn new(
+        metadata: TuiMetadata,
+        restored_messages: &[Message],
+        start_in_session_picker: bool,
+    ) -> Self {
         let inspect_root = metadata.workspace_host_path.clone();
         let workspace = WorkspaceSnapshot::load(&metadata.cwd, inspect_root.as_deref());
         let project_tree_root = workspace.host_root.clone();
@@ -453,7 +472,7 @@ impl App {
             launched_at: Instant::now(),
             working_started_at: None,
             working_frame: 0,
-            restored_message_count: restored_messages.len(),
+            restored_message_count: visible_restored_message_count(restored_messages),
             last_prompt: None,
             last_response: None,
             previous_response: None,
@@ -467,6 +486,8 @@ impl App {
             panel_scrolls,
             panel_views: HashMap::new(),
             selection: None,
+            screen: ScreenMode::Dashboard,
+            session_picker: SessionPickerState::default(),
         };
 
         app.refresh_project_tree();
@@ -482,6 +503,9 @@ impl App {
                 Tone::Muted,
             );
         }
+        if start_in_session_picker {
+            app.open_session_picker(true);
+        }
         app
     }
 
@@ -494,6 +518,9 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) -> AppAction {
+        if matches!(self.screen, ScreenMode::SessionPicker { .. }) {
+            return AppAction::None;
+        }
         if matches!(self.send_state, SendState::Pending) {
             return AppAction::None;
         }
@@ -505,6 +532,10 @@ impl App {
     fn handle_key_event(&mut self, key: KeyEvent) -> AppAction {
         if key.kind == KeyEventKind::Release {
             return AppAction::None;
+        }
+
+        if matches!(self.screen, ScreenMode::SessionPicker { .. }) {
+            return self.handle_session_picker_key_event(key);
         }
 
         match key {
@@ -553,6 +584,11 @@ impl App {
                     self.quit = true;
                     return AppAction::Quit;
                 }
+                if trimmed == "/sessions" {
+                    self.open_session_picker(false);
+                    self.clear_composer();
+                    return AppAction::None;
+                }
 
                 AppAction::Submit(prompt)
             }
@@ -566,6 +602,10 @@ impl App {
     }
 
     fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if matches!(self.screen, ScreenMode::SessionPicker { .. }) {
+            return;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(point) = self.selection_point_at(mouse.column, mouse.row) {
@@ -626,6 +666,108 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn handle_session_picker_key_event(&mut self, key: KeyEvent) -> AppAction {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.quit = true;
+                AppAction::Quit
+            }
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            } => {
+                if matches!(self.screen, ScreenMode::SessionPicker { startup: true }) {
+                    self.quit = true;
+                    AppAction::Quit
+                } else {
+                    self.screen = ScreenMode::Dashboard;
+                    AppAction::None
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('k'),
+                ..
+            } => {
+                self.session_picker.selected = self.session_picker.selected.saturating_sub(1);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('j'),
+                ..
+            } => {
+                if !self.session_picker.sessions.is_empty() {
+                    self.session_picker.selected = self
+                        .session_picker
+                        .selected
+                        .saturating_add(1)
+                        .min(self.session_picker.sessions.len().saturating_sub(1));
+                }
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('r'),
+                ..
+            } => {
+                self.refresh_session_picker();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => self
+                .session_picker
+                .sessions
+                .get(self.session_picker.selected)
+                .map(|session| AppAction::ResumeSession(session.session_id.clone()))
+                .unwrap_or(AppAction::None),
+            _ => AppAction::None,
+        }
+    }
+
+    fn open_session_picker(&mut self, startup: bool) {
+        self.refresh_session_picker();
+        self.selection = None;
+        self.screen = ScreenMode::SessionPicker { startup };
+    }
+
+    fn refresh_session_picker(&mut self) {
+        match sessions::list_sessions() {
+            Ok(sessions) => {
+                let current_session = self.metadata.session_id.as_deref();
+                let selected = current_session
+                    .and_then(|current| {
+                        sessions
+                            .iter()
+                            .position(|session| session.session_id == current)
+                    })
+                    .unwrap_or(0);
+                self.session_picker.sessions = sessions;
+                self.session_picker.selected =
+                    selected.min(self.session_picker.sessions.len().saturating_sub(1));
+                self.session_picker.error = None;
+            }
+            Err(error) => {
+                self.session_picker.sessions.clear();
+                self.session_picker.selected = 0;
+                self.session_picker.error = Some(error.to_string());
             }
         }
     }
@@ -974,6 +1116,12 @@ impl App {
 
         self.render_header(frame, sections[0]);
 
+        if matches!(self.screen, ScreenMode::SessionPicker { .. }) {
+            self.render_session_picker(frame, sections[1]);
+            self.render_session_picker_footer(frame, sections[2]);
+            return;
+        }
+
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -1089,6 +1237,225 @@ impl App {
         ]);
 
         frame.render_widget(Paragraph::new(Text::from(vec![top, bottom])), inner);
+    }
+
+    fn render_session_picker(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let sections = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(area);
+
+        self.render_session_picker_list(frame, sections[0]);
+        self.render_session_picker_detail(frame, sections[1]);
+    }
+
+    fn render_session_picker_list(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let block = panel_block("SESSIONS");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let mut lines = Vec::new();
+        if let Some(error) = self.session_picker.error.as_deref() {
+            lines.push(Line::from(Span::styled(
+                fit_text(error, inner.width as usize),
+                Style::default().fg(Color::Red),
+            )));
+        } else if self.session_picker.sessions.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No resumable sessions found.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for (index, session) in self
+                .session_picker
+                .sessions
+                .iter()
+                .take(inner.height as usize)
+                .enumerate()
+            {
+                let selected = index == self.session_picker.selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let session_label = fit_text(&session.session_id, 18);
+                let cwd_label = compact_path(
+                    &session.cwd.display().to_string(),
+                    inner.width.saturating_sub(24) as usize,
+                );
+                lines.push(Line::from(vec![
+                    Span::styled(if selected { "› " } else { "  " }, style),
+                    Span::styled(format!("{}  ", short_timestamp(&session.updated_at)), style),
+                    Span::styled(session_label, style),
+                    Span::styled("  ", style),
+                    Span::styled(cwd_label, style),
+                ]));
+            }
+        }
+
+        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    }
+
+    fn render_session_picker_detail(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let block = panel_block("SESSION DETAIL");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let mut lines = Vec::new();
+        if let Some(session) = self
+            .session_picker
+            .sessions
+            .get(self.session_picker.selected)
+        {
+            lines.push(Line::from(vec![
+                Span::styled("session  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    session.session_id.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("updated  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    session.updated_at.clone(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("created  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    session.created_at.clone(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("cwd      ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    compact_path(
+                        &session.cwd.display().to_string(),
+                        inner.width.saturating_sub(9) as usize,
+                    ),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("model    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(session.model.clone(), Style::default().fg(Color::White)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("backend  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    session.backend.as_str().to_string(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("sandbox  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    if session.sandboxed { "on" } else { "off" },
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("messages ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    session.visible_message_count.to_string(),
+                    Style::default().fg(Color::White),
+                ),
+            ]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "last prompt",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            let prompt_lines = session
+                .last_user_prompt
+                .as_deref()
+                .map(split_preserving_empty)
+                .unwrap_or_else(|| vec!["No user prompt recorded.".to_string()]);
+            for line in prompt_lines {
+                lines.push(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::White),
+                )));
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Select a session to inspect.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)).wrap(ratatui::widgets::Wrap { trim: false }),
+            inner,
+        );
+    }
+
+    fn render_session_picker_footer(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let title = if matches!(self.screen, ScreenMode::SessionPicker { startup: true }) {
+            "RESUME"
+        } else {
+            "SESSIONS"
+        };
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" resume  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "↑/↓",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "r",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" refresh  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if matches!(self.screen, ScreenMode::SessionPicker { startup: true }) {
+                        " exit"
+                    } else {
+                        " back"
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "Use /sessions from the composer to return here later.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        render_lines_panel(frame, area, title, lines);
     }
 
     fn render_left_column(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1620,6 +1987,12 @@ enum AppAction {
     None,
     Quit,
     Submit(String),
+    ResumeSession(String),
+}
+
+pub enum TuiOutcome {
+    Exit,
+    ResumeSession(String),
 }
 
 pub async fn run(
@@ -1628,7 +2001,8 @@ pub async fn run(
     metadata: TuiMetadata,
     restored_messages: Vec<Message>,
     mut session_snapshot: Option<SessionSnapshot>,
-) -> Result<()> {
+    start_in_session_picker: bool,
+) -> Result<TuiOutcome> {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<CrosstermEvent>();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Result<String, String>>();
@@ -1650,7 +2024,7 @@ pub async fn run(
     let running = Arc::new(AtomicBool::new(true));
     let input_thread = spawn_input_thread(running.clone(), input_tx);
 
-    let mut app = App::new(metadata, &restored_messages);
+    let mut app = App::new(metadata, &restored_messages, start_in_session_picker);
     let mut animation_tick = time::interval(Duration::from_millis(150));
     animation_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     terminal.draw(|frame| app.render(frame))?;
@@ -1665,6 +2039,8 @@ pub async fn run(
         )?;
     }
 
+    let mut outcome = TuiOutcome::Exit;
+
     let loop_result = async {
         while !app.quit {
             tokio::select! {
@@ -1674,6 +2050,10 @@ pub async fn run(
                             match app.handle_key_event(key) {
                                 AppAction::Submit(prompt) => {
                                     submit_prompt(prompt, agent.clone(), result_tx.clone(), &mut app, &mut terminal)?;
+                                }
+                                AppAction::ResumeSession(session_id) => {
+                                    outcome = TuiOutcome::ResumeSession(session_id);
+                                    app.quit = true;
                                 }
                                 AppAction::Quit | AppAction::None => {}
                             }
@@ -1737,7 +2117,7 @@ pub async fn run(
 
     loop_result?;
     cleanup_result?;
-    Ok(())
+    Ok(outcome)
 }
 
 fn submit_prompt(
@@ -2733,6 +3113,17 @@ fn split_preserving_empty(text: &str) -> Vec<String> {
     text.split('\n').map(|line| line.to_string()).collect()
 }
 
+fn visible_restored_message_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| match message {
+            Message::User { .. } => true,
+            Message::Assistant { content, .. } => content.is_some(),
+            _ => false,
+        })
+        .count()
+}
+
 fn short_session(session_id: &str) -> String {
     session_id.chars().take(8).collect()
 }
@@ -2742,6 +3133,10 @@ fn short_clock(timestamp: &str) -> String {
         .rsplit_once(' ')
         .map(|(_, time)| time.to_string())
         .unwrap_or_else(|| fit_text(timestamp, 8))
+}
+
+fn short_timestamp(timestamp: &str) -> String {
+    fit_text(timestamp, 19)
 }
 
 fn utc_hms() -> String {
@@ -2908,7 +3303,7 @@ mod tests {
     #[test]
     fn shift_enter_inserts_newline() {
         let dir = temp_dir("newline");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
         app.composer.insert_str("hello");
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
@@ -2921,7 +3316,7 @@ mod tests {
     #[test]
     fn enter_submits_prompt() {
         let dir = temp_dir("submit");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
         app.composer.insert_str("hello");
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2936,7 +3331,7 @@ mod tests {
     #[test]
     fn slash_exit_quits() {
         let dir = temp_dir("exit");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
         app.composer.insert_str("/exit");
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2949,7 +3344,7 @@ mod tests {
     #[test]
     fn repeat_backspace_is_processed() {
         let dir = temp_dir("backspace");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
         app.composer.insert_str("ab");
 
         let action = app.handle_key_event(KeyEvent {
@@ -2967,7 +3362,7 @@ mod tests {
     #[test]
     fn multiline_paste_inserts_newlines_without_submit() {
         let dir = temp_dir("paste");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
 
         let action = app.handle_paste("hello\nworld");
 
@@ -2979,7 +3374,7 @@ mod tests {
     #[test]
     fn pasted_crlf_is_normalized_to_newlines() {
         let dir = temp_dir("paste-crlf");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
 
         app.handle_paste("hello\r\nworld\rtest");
 
@@ -2988,9 +3383,49 @@ mod tests {
     }
 
     #[test]
+    fn restored_message_count_ignores_system_and_tool_messages() {
+        let messages = vec![
+            Message::System {
+                content: "system".to_string(),
+            },
+            Message::Tool {
+                tool_call_id: "call-1".to_string(),
+                content: "tool result".to_string(),
+            },
+            Message::Assistant {
+                content: None,
+                reasoning_text: Some("thinking".to_string()),
+                reasoning_details: None,
+                tool_calls: None,
+            },
+            Message::User {
+                content: "hello".to_string(),
+            },
+        ];
+
+        assert_eq!(visible_restored_message_count(&messages), 1);
+    }
+
+    #[test]
+    fn sessions_command_opens_picker() {
+        let dir = temp_dir("sessions-command");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.composer.insert_str("/sessions");
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(action, AppAction::None));
+        assert!(matches!(
+            app.screen,
+            ScreenMode::SessionPicker { startup: false }
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn thread_lifecycle_switches_active_to_idle() {
         let dir = temp_dir("thread");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
 
         app.apply_agent_event(AgentEvent::ThreadStarted {
             name: "auth".to_string(),
@@ -3015,7 +3450,7 @@ mod tests {
     #[test]
     fn tool_finishes_into_recent_history() {
         let dir = temp_dir("tool");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
 
         app.apply_agent_event(AgentEvent::ToolCallStarted {
             thread_name: Some("coder-1".to_string()),
@@ -3041,7 +3476,7 @@ mod tests {
     #[test]
     fn top_level_responses_shift_into_previous_response() {
         let dir = temp_dir("responses");
-        let mut app = App::new(metadata_for(&dir), &[]);
+        let mut app = App::new(metadata_for(&dir), &[], false);
 
         app.apply_agent_event(AgentEvent::AssistantMessage {
             thread_name: None,
