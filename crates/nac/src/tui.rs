@@ -43,9 +43,8 @@ const MIN_TERMINAL_HEIGHT: u16 = 22;
 const TIMELINE_LIMIT: usize = 220;
 const TOOL_HISTORY_LIMIT: usize = 20;
 const FILE_CHANGE_LIMIT: usize = 36;
-const PROMPT_LABEL: &str = "ask";
 const PROMPT_SEPARATOR: &str = " › ";
-const CONTINUATION_PREFIX: &str = "    · ";
+const CONTINUATION_PREFIX: &str = "   ";
 
 type UiTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -146,9 +145,11 @@ impl ToolStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PanelId {
     Prompt,
+    Threads,
     Response,
     PreviousResponse,
     Workspace,
+    Tools,
 }
 
 #[derive(Debug, Clone)]
@@ -402,6 +403,7 @@ struct LifeField {
     width: usize,
     height: usize,
     cells: Vec<bool>,
+    low_activity_ticks: usize,
 }
 
 struct App {
@@ -443,9 +445,11 @@ impl App {
 
         let mut panel_scrolls = HashMap::new();
         panel_scrolls.insert(PanelId::Prompt, 0);
+        panel_scrolls.insert(PanelId::Threads, 0);
         panel_scrolls.insert(PanelId::Response, 0);
         panel_scrolls.insert(PanelId::PreviousResponse, 0);
         panel_scrolls.insert(PanelId::Workspace, 0);
+        panel_scrolls.insert(PanelId::Tools, 0);
 
         let mut app = Self {
             metadata,
@@ -1188,7 +1192,7 @@ impl App {
             Span::styled(session, Style::default().fg(Color::White)),
             Span::styled("  |  model ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                fit_text(&self.metadata.model, 22),
+                self.metadata.model.clone(),
                 Style::default().fg(Color::White),
             ),
         ]);
@@ -1540,7 +1544,7 @@ impl App {
         render_lines_panel(frame, area, "HOTKEYS", lines);
     }
 
-    fn render_threads_panel(&self, frame: &mut ratatui::Frame, area: Rect) {
+    fn render_threads_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let width = inner_width(area);
         let state_width = 8usize;
         let thread_width = width.min(18).max(10);
@@ -1591,7 +1595,7 @@ impl App {
             }
         }
 
-        render_lines_panel(frame, area, "THREADS", lines);
+        self.render_scrollable_lines_panel(frame, area, PanelId::Threads, "THREADS", lines);
     }
 
     fn render_events_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1654,7 +1658,7 @@ impl App {
                 Style::default().fg(if matches!(self.send_state, SendState::Pending) {
                     Color::Green
                 } else {
-                    Color::White
+                    Color::Yellow
                 }),
             ),
         ]);
@@ -1675,7 +1679,7 @@ impl App {
         );
     }
 
-    fn render_tools_panel(&self, frame: &mut ratatui::Frame, area: Rect) {
+    fn render_tools_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let width = inner_width(area);
         let tool_width = width.min(14).max(9);
         let duration_width = 8usize;
@@ -1738,7 +1742,7 @@ impl App {
             lines.push(Line::from("No tool activity yet."));
         }
 
-        render_lines_panel(frame, area, "TOOLS", lines);
+        self.render_scrollable_lines_panel(frame, area, PanelId::Tools, "TOOLS", lines);
     }
 
     fn render_checks_panel(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1798,7 +1802,7 @@ impl App {
     }
 
     fn render_composer(&mut self, frame: &mut ratatui::Frame, area: Rect) {
-        let block = panel_block("COMPOSER");
+        let block = panel_block("ASK");
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -1906,8 +1910,90 @@ impl App {
         frame.render_widget(Paragraph::new(Text::from(rendered)), inner);
     }
 
+    fn render_scrollable_lines_panel(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        panel_id: PanelId,
+        title: &'static str,
+        lines: Vec<Line<'static>>,
+    ) {
+        self.render_scrollable_lines_panel_with_title(
+            frame,
+            area,
+            panel_id,
+            panel_title(title),
+            lines,
+        );
+    }
+
+    fn render_scrollable_lines_panel_with_title(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        panel_id: PanelId,
+        title: Line<'static>,
+        lines: Vec<Line<'static>>,
+    ) {
+        let block = panel_block_with_title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let logical_lines: Vec<String> = lines.iter().map(line_to_plain_text).collect();
+        let mut rows: Vec<WrappedRow> = logical_lines
+            .iter()
+            .enumerate()
+            .map(|(index, text)| WrappedRow {
+                logical_line: index,
+                start_char: 0,
+                end_char: text.chars().count(),
+                text: text.clone(),
+            })
+            .collect();
+        if rows.is_empty() {
+            rows.push(WrappedRow {
+                logical_line: 0,
+                start_char: 0,
+                end_char: 0,
+                text: String::new(),
+            });
+        }
+
+        let visible_rows = inner.height as usize;
+        let max_scroll = rows.len().saturating_sub(visible_rows);
+        let scroll = self.panel_scrolls.entry(panel_id).or_insert(0);
+        *scroll = (*scroll).min(max_scroll);
+        let start = *scroll;
+        let mut visible: Vec<Line<'static>> =
+            lines.into_iter().skip(start).take(visible_rows).collect();
+        while visible.len() < visible_rows {
+            visible.push(Line::from(""));
+        }
+
+        self.panel_views.insert(
+            panel_id,
+            PanelView {
+                id: panel_id,
+                inner,
+                logical_lines,
+                rows,
+                scroll_offset: *scroll,
+                visible_rows,
+            },
+        );
+
+        frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+    }
+
     fn selection_point_at(&self, column: u16, row: u16) -> Option<SelectionPoint> {
         let panel = self.panel_at(column, row)?;
+        if !panel_is_selectable(panel) {
+            return None;
+        }
         self.selection_point_for_panel(panel, column, row)
     }
 
@@ -2036,7 +2122,7 @@ pub async fn run(
     let input_thread = spawn_input_thread(running.clone(), input_tx);
 
     let mut app = App::new(metadata, &restored_messages, start_in_session_picker);
-    let mut animation_tick = time::interval(Duration::from_millis(150));
+    let mut animation_tick = time::interval(Duration::from_millis(75));
     animation_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     terminal.draw(|frame| app.render(frame))?;
 
@@ -2210,6 +2296,7 @@ impl LifeField {
         self.width = width;
         self.height = height;
         self.cells = seed_life_cells(width, height, seed);
+        self.low_activity_ticks = 0;
     }
 
     fn step(&mut self, seed: u64) {
@@ -2219,19 +2306,35 @@ impl LifeField {
 
         let mut next = vec![false; self.cells.len()];
         let mut alive = 0usize;
+        let mut changed = 0usize;
         for y in 0..self.height {
             for x in 0..self.width {
                 let idx = self.index(x, y);
                 let neighbors = self.live_neighbor_count(x, y);
-                let next_alive = matches!((self.cells[idx], neighbors), (true, 2 | 3) | (false, 3));
+                let next_alive =
+                    matches!((self.cells[idx], neighbors), (true, 2 | 3) | (false, 3 | 6));
                 next[idx] = next_alive;
                 alive += usize::from(next_alive);
+                changed += usize::from(self.cells[idx] != next_alive);
             }
         }
 
         self.cells = if alive == 0 {
+            self.low_activity_ticks = 0;
             seed_life_cells(self.width, self.height, seed)
         } else {
+            let low_activity_threshold = (self.width * self.height / 384).max(6);
+            if changed <= low_activity_threshold {
+                self.low_activity_ticks = self.low_activity_ticks.saturating_add(1);
+            } else {
+                self.low_activity_ticks = 0;
+            }
+
+            if self.low_activity_ticks >= 24 {
+                inject_sparse_center_patch(&mut next, self.width, self.height, seed);
+                self.low_activity_ticks = 0;
+            }
+
             next
         };
     }
@@ -2281,13 +2384,9 @@ impl LifeField {
                 if dx == 0 && dy == 0 {
                     continue;
                 }
-                let Some(nx) = x.checked_add_signed(dx) else {
-                    continue;
-                };
-                let Some(ny) = y.checked_add_signed(dy) else {
-                    continue;
-                };
-                if nx < self.width && ny < self.height && self.cells[self.index(nx, ny)] {
+                let nx = wrap_index(x, dx, self.width);
+                let ny = wrap_index(y, dy, self.height);
+                if self.cells[self.index(nx, ny)] {
                     count += 1;
                 }
             }
@@ -2333,6 +2432,45 @@ fn seed_life_cells(width: usize, height: usize, seed: u64) -> Vec<bool> {
     }
 
     cells
+}
+
+fn inject_sparse_center_patch(cells: &mut [bool], width: usize, height: usize, seed: u64) {
+    if width == 0 || height == 0 || cells.is_empty() {
+        return;
+    }
+
+    let center_x = (width / 2) as isize;
+    let center_y = (height / 2) as isize;
+    let radius_x = (width / 7).max(3) as isize;
+    let radius_y = (height / 7).max(3) as isize;
+    let patch_count = ((width * height) / 640).clamp(10, 28);
+
+    for index in 0..patch_count {
+        let salt = seed ^ ((index as u64 + 1) * 0x9e3779b97f4a7c15);
+        let dx = sample_center_biased_offset(salt, radius_x);
+        let dy = sample_center_biased_offset(salt ^ 0xbf58476d1ce4e5b9, radius_y);
+        let x = (center_x + dx).clamp(0, width.saturating_sub(1) as isize) as usize;
+        let y = (center_y + dy).clamp(0, height.saturating_sub(1) as isize) as usize;
+        cells[y * width + x] = true;
+    }
+}
+
+fn sample_center_biased_offset(seed: u64, radius: isize) -> isize {
+    if radius <= 0 {
+        return 0;
+    }
+
+    let span = radius as u64 + 1;
+    let left = (splitmix64(seed) % span) as isize;
+    let right = (splitmix64(seed ^ 0x94d049bb133111eb) % span) as isize;
+    left - right
+}
+
+fn wrap_index(index: usize, delta: isize, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    ((index as isize + delta).rem_euclid(len as isize)) as usize
 }
 
 fn splitmix64(mut value: u64) -> u64 {
@@ -2749,6 +2887,21 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn panel_is_selectable(panel: PanelId) -> bool {
+    matches!(
+        panel,
+        PanelId::Prompt | PanelId::Response | PanelId::PreviousResponse | PanelId::Workspace
+    )
+}
+
+fn line_to_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 fn status_span(label: &str, tone: Tone) -> Span<'static> {
     Span::styled(
         label.to_string(),
@@ -3129,18 +3282,12 @@ fn wrap_soft_line_with_ranges(line: &str, width: usize) -> Vec<(usize, usize, St
 }
 
 fn composer_prefix_width() -> usize {
-    PROMPT_LABEL.chars().count() + PROMPT_SEPARATOR.chars().count()
+    PROMPT_SEPARATOR.chars().count()
 }
 
 fn prompt_line(is_first: bool, content: &str) -> Line<'static> {
     let mut spans = Vec::new();
     if is_first {
-        spans.push(Span::styled(
-            PROMPT_LABEL,
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ));
         spans.push(Span::styled(
             PROMPT_SEPARATOR,
             Style::default()
