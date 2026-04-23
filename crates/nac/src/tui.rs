@@ -25,7 +25,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 use ratatui_textarea::TextArea;
 use tokio::sync::{mpsc, Mutex};
@@ -43,8 +43,7 @@ const MIN_TERMINAL_HEIGHT: u16 = 22;
 const TIMELINE_LIMIT: usize = 220;
 const TOOL_HISTORY_LIMIT: usize = 20;
 const FILE_CHANGE_LIMIT: usize = 36;
-const ACTIVE_WORKSPACE_REFRESH_INTERVAL: Duration = Duration::from_millis(400);
-const IDLE_WORKSPACE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const WORKSPACE_REFRESH_INTERVAL: Duration = Duration::from_millis(400);
 const PROMPT_SEPARATOR: &str = " › ";
 const CONTINUATION_PREFIX: &str = "   ";
 
@@ -805,13 +804,7 @@ impl App {
     }
 
     fn maybe_refresh_workspace(&mut self) {
-        let refresh_interval = if matches!(self.send_state, SendState::Pending) {
-            ACTIVE_WORKSPACE_REFRESH_INTERVAL
-        } else {
-            IDLE_WORKSPACE_REFRESH_INTERVAL
-        };
-
-        if self.last_workspace_refresh_at.elapsed() >= refresh_interval {
+        if self.last_workspace_refresh_at.elapsed() >= WORKSPACE_REFRESH_INTERVAL {
             self.refresh_workspace();
         }
     }
@@ -2298,6 +2291,7 @@ fn render_lines_panel_with_title(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    frame.render_widget(Clear, inner);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
@@ -3223,7 +3217,11 @@ fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string(),
+    )
 }
 
 fn parse_remote_label(remote: &str) -> Option<String> {
