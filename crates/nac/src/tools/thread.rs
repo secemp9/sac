@@ -12,11 +12,13 @@ use crate::store;
 use crate::tools::{require_str, require_string_array, ToolResult, ToolRuntime};
 use crate::types::ToolDefinition;
 
+const DEFAULT_THREAD_TIMEOUT_SECS: u64 = 60 * 60;
+
 pub fn dispatch_definition() -> ToolDefinition {
     use serde_json::json;
     def(
         "thread",
-        "Dispatch a named worker thread. The worker reuses its own retained history and can pull the latest retained episode from other named threads.",
+        "Dispatch a named worker thread. The worker reuses its own retained history and can pull the latest retained episode from other named threads. Default timeout is 3600 seconds.",
         json!({
             "type": "object",
             "properties": {
@@ -26,7 +28,8 @@ pub fn dispatch_definition() -> ToolDefinition {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Other thread names whose latest retained episodes should be loaded."
-                }
+                },
+                "timeout": { "type": "integer", "description": "Timeout in seconds for this dispatch (default 3600)." }
             },
             "required": ["name", "action"]
         }),
@@ -107,10 +110,15 @@ pub async fn execute_dispatch(
         };
     }
 
-    let timeout_secs: u64 = std::env::var("AGENT_THREAD_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
+    let timeout_secs: u64 = args
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            std::env::var("AGENT_THREAD_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(DEFAULT_THREAD_TIMEOUT_SECS);
 
     runtime.event_sink.emit(AgentEvent::ThreadStarted {
         name: thread_name.clone(),

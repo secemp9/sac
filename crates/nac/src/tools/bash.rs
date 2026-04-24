@@ -5,12 +5,17 @@ use tokio::time::timeout;
 
 use crate::tools::{require_str, ToolResult, ToolRuntime};
 
+const DEFAULT_BASH_TIMEOUT_SECS: u64 = 5 * 60;
+
 pub async fn execute(args: Value, runtime: &ToolRuntime) -> ToolResult {
     let command = match require_str(&args, "command") {
         Ok(value) => value,
         Err(error) => return error,
     };
-    let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(120);
+    let timeout_secs = args
+        .get("timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_BASH_TIMEOUT_SECS);
 
     let result = timeout(
         Duration::from_secs(timeout_secs),

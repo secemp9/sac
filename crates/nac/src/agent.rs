@@ -118,10 +118,11 @@ impl Agent {
                      baseline thread before implementation.\n\
                      Prefer stable thread roles when useful, such as setup, impl/<topic>, and verify/<topic>.\n\
                      Threads do not share full live context with each other. When you dispatch \
-                     thread(name, action, threads?), the worker for name receives that thread's own retained \
+                     thread(name, action, threads?, timeout?), the worker for name receives that thread's own retained \
                      history, and if you provide threads, it also receives the latest retained episode from \
                      each named source thread as input for that dispatch. The worker's final response becomes \
-                     the next retained episode for name.\n\
+                     the next retained episode for name. The default thread timeout is 3600 seconds; pass \
+                     timeout only when a dispatch genuinely needs a different limit.\n\
                      Use this mechanism deliberately. Dispatch work so that important setup, implementation, \
                      and verification threads end by producing a high-signal retained episode that another \
                      thread can act on directly. Avoid dispatches that leave behind weak episodes and force \
@@ -138,7 +139,7 @@ impl Agent {
                      asks for them.\n\
                      You may dispatch independent threads in parallel when useful.\n\n\
                      Your tools:\n\
-                     - thread(name, action, threads?)\n\
+                     - thread(name, action, threads?, timeout?)\n\
                      - threads()\n\
                      - thread_read(name)\n\
                      - thread_delete(name)\n\

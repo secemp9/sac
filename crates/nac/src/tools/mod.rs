@@ -90,7 +90,7 @@ pub fn worker_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "Shell command to execute" },
-                    "timeout": { "type": "integer", "description": "Timeout in seconds (default 120)" }
+                    "timeout": { "type": "integer", "description": "Timeout in seconds (default 300)" }
                 },
                 "required": ["command"]
             }),

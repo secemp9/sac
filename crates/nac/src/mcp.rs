@@ -28,7 +28,7 @@ use crate::types::{FunctionDef, ToolDefinition};
 type McpService = RunningService<RoleClient, NacMcpClientHandler>;
 const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MCP_TOOL_INVENTORY_TIMEOUT: Duration = Duration::from_secs(15);
-const MCP_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+const MCP_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 pub struct McpRegistry {
