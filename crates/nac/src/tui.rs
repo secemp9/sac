@@ -248,14 +248,16 @@ fn load_workset_records(
     store_path: &Path,
     session_id: &str,
 ) -> anyhow::Result<Vec<store::WorksetRecord>> {
-    let summaries = store::list_worksets(store_path, session_id, None)?;
-    let mut worksets = Vec::with_capacity(summaries.len());
-    for summary in summaries {
-        if let Some(workset) = store::read_workset(store_path, session_id, &summary.id)? {
-            worksets.push(workset);
+    tokio::task::block_in_place(|| {
+        let summaries = store::list_worksets(store_path, session_id, None)?;
+        let mut worksets = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            if let Some(workset) = store::read_workset(store_path, session_id, &summary.id)? {
+                worksets.push(workset);
+            }
         }
-    }
-    Ok(worksets)
+        Ok(worksets)
+    })
 }
 
 impl WorkspaceSnapshot {
@@ -982,7 +984,7 @@ impl App {
     }
 
     fn refresh_session_picker(&mut self) {
-        match sessions::list_sessions() {
+        match tokio::task::block_in_place(|| sessions::list_sessions()) {
             Ok(sessions) => {
                 let current_session = self.metadata.session_id.as_deref();
                 let selected = current_session
@@ -1009,7 +1011,9 @@ impl App {
         let Some(session_id) = self.metadata.session_id.as_deref() else {
             return;
         };
-        let Ok(threads) = store::list_threads(&self.metadata.store_path, session_id) else {
+        let Ok(threads) = tokio::task::block_in_place(|| {
+            store::list_threads(&self.metadata.store_path, session_id)
+        }) else {
             return;
         };
 
@@ -1043,7 +1047,9 @@ impl App {
         let Some(session_id) = self.metadata.session_id.as_deref() else {
             return;
         };
-        if let Ok(episodes) = store::load_all_episodes(&self.metadata.store_path, session_id) {
+        if let Ok(episodes) =
+            tokio::task::block_in_place(|| store::load_all_episodes(&self.metadata.store_path, session_id))
+        {
             self.all_episodes = episodes;
         }
         self.episode_markdown_cache.clear();
@@ -3121,7 +3127,7 @@ pub async fn run(
                         app.reset_life();
                         if let Some(snapshot) = session_snapshot.as_mut() {
                             let agent = agent.lock().await;
-                            persist_session_snapshot(snapshot, &agent)?;
+                            persist_session_snapshot(snapshot, &agent).await?;
                         }
                         match result {
                             Ok(_) => {
@@ -5092,9 +5098,13 @@ fn spawn_input_thread(
     })
 }
 
-fn persist_session_snapshot(snapshot: &mut SessionSnapshot, agent: &Agent) -> Result<()> {
+async fn persist_session_snapshot(snapshot: &mut SessionSnapshot, agent: &Agent) -> Result<()> {
     let refreshed = sessions::refresh_snapshot(snapshot, agent.messages.clone());
-    sessions::save_session(&refreshed)?;
+    let snapshot_for_blocking = refreshed.clone();
+    tokio::task::spawn_blocking(move || {
+        sessions::save_session(&snapshot_for_blocking)
+    })
+    .await??;
     *snapshot = refreshed;
     Ok(())
 }
