@@ -727,6 +727,19 @@ impl App {
                 }
                 AppAction::None
             }
+            // Some terminals encode Shift+Enter as LF, which crossterm reports as Ctrl+J in raw mode.
+            KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if self.result_rx.is_none() {
+                    self.composer.insert_newline();
+                }
+                AppAction::None
+            }
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
@@ -5142,6 +5155,19 @@ mod tests {
         app.composer.insert_str("hello");
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.prompt(), "hello\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn control_j_inserts_newline_without_deleting_text() {
+        let dir = temp_dir("ctrl-j-newline");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.composer.insert_str("hello");
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
 
         assert!(matches!(action, AppAction::None));
         assert_eq!(app.prompt(), "hello\n");
