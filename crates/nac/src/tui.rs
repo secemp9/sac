@@ -45,6 +45,7 @@ const TIMELINE_LIMIT: usize = 220;
 const TOOL_HISTORY_LIMIT: usize = 20;
 const FILE_CHANGE_LIMIT: usize = 36;
 const WORKSPACE_REFRESH_INTERVAL: Duration = Duration::from_millis(400);
+const WORKING_TIMEOUT: Duration = Duration::from_secs(600);
 const PROMPT_SEPARATOR: &str = " › ";
 const COMMAND_SEPARATOR: &str = " / ";
 const CONTINUATION_PREFIX: &str = "   ";
@@ -63,12 +64,6 @@ pub struct TuiMetadata {
     pub session_id: Option<String>,
     pub sandbox_status: String,
     pub agents_md_status: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SendState {
-    Idle,
-    Pending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,9 +434,8 @@ struct App {
     inspect_root: Option<PathBuf>,
     composer: TextArea<'static>,
     composer_notice: Option<ComposerNotice>,
-    send_state: SendState,
+    result_rx: Option<tokio::sync::oneshot::Receiver<Result<String, String>>>,
     quit: bool,
-    pending_error_reported: bool,
     working_started_at: Option<Instant>,
     working_frame: usize,
     last_response_duration: Duration,
@@ -463,6 +457,7 @@ struct App {
     workspace_tx: Option<mpsc::Sender<WorkspaceSnapshot>>,
     workspace_rx: Option<mpsc::Receiver<WorkspaceSnapshot>>,
     workspace_refresh_pending: bool,
+    workspace_refresh_deadline: Option<Instant>,
     panel_scrolls: HashMap<PanelId, usize>,
     panel_views: HashMap<PanelId, PanelView>,
     selection: Option<SelectionState>,
@@ -500,9 +495,8 @@ impl App {
             inspect_root,
             composer: build_composer(),
             composer_notice: None,
-            send_state: SendState::Idle,
+            result_rx: None,
             quit: false,
-            pending_error_reported: false,
             working_started_at: None,
             working_frame: 0,
             last_response_duration: Duration::default(),
@@ -524,6 +518,7 @@ impl App {
             workspace_tx: None,
             workspace_rx: None,
             workspace_refresh_pending: false,
+            workspace_refresh_deadline: None,
             panel_scrolls,
             panel_views: HashMap::new(),
             selection: None,
@@ -588,7 +583,7 @@ impl App {
         if self.help_visible || matches!(self.screen, ScreenMode::SessionPicker { .. }) {
             return AppAction::None;
         }
-        if matches!(self.send_state, SendState::Pending) {
+        if self.result_rx.is_some() {
             return AppAction::None;
         }
 
@@ -727,7 +722,7 @@ impl App {
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::SHIFT) => {
-                if matches!(self.send_state, SendState::Idle) {
+                if self.result_rx.is_none() {
                     self.composer.insert_newline();
                 }
                 AppAction::None
@@ -738,7 +733,7 @@ impl App {
             } => {
                 let prompt = self.prompt();
                 let trimmed = prompt.trim();
-                if trimmed.is_empty() || matches!(self.send_state, SendState::Pending) {
+                if trimmed.is_empty() || self.result_rx.is_some() {
                     return AppAction::None;
                 }
 
@@ -769,7 +764,7 @@ impl App {
                 AppAction::Submit(prompt)
             }
             _ => {
-                if matches!(self.send_state, SendState::Idle) {
+                if self.result_rx.is_none() {
                     self.clear_composer_notice();
                     self.composer.input(key);
                 }
@@ -1051,6 +1046,7 @@ impl App {
         let cwd = self.metadata.cwd.clone();
         let inspect_root = self.inspect_root.clone();
         self.workspace_refresh_pending = true;
+        self.workspace_refresh_deadline = Some(Instant::now() + Duration::from_secs(5));
         tokio::task::spawn_blocking(move || {
             let snapshot = WorkspaceSnapshot::load(&cwd, inspect_root.as_deref());
             let _ = tx.blocking_send(snapshot);
@@ -1066,11 +1062,22 @@ impl App {
             Ok(snapshot) => {
                 self.workspace = snapshot;
                 self.workspace_refresh_pending = false;
+                self.workspace_refresh_deadline = None;
             }
-            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Empty) => {
+                if self.workspace_refresh_pending {
+                    if let Some(deadline) = self.workspace_refresh_deadline {
+                        if Instant::now() >= deadline {
+                            self.workspace_refresh_pending = false;
+                            self.workspace_refresh_deadline = None;
+                        }
+                    }
+                }
+            }
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 self.workspace_rx = None;
                 self.workspace_refresh_pending = false;
+                self.workspace_refresh_deadline = None;
             }
         }
     }
@@ -1086,7 +1093,6 @@ impl App {
     }
 
     fn note_send_error(&mut self, error: String) {
-        self.pending_error_reported = true;
         self.push_timeline("send", format!("error • {error}"), Tone::Error);
     }
 
@@ -1310,7 +1316,6 @@ impl App {
                 thread_name,
                 message,
             } => {
-                self.pending_error_reported = true;
                 let actor = thread_name.unwrap_or_else(|| "run".to_string());
                 self.push_timeline(actor, format!("error • {message}"), Tone::Error);
             }
@@ -1550,7 +1555,7 @@ impl App {
             .map(short_session)
             .unwrap_or_else(|| "-".to_string());
         let runtime = format_runtime(self.displayed_run_duration());
-        let run_state = if matches!(self.send_state, SendState::Pending) {
+        let run_state = if self.result_rx.is_some() {
             ("RUNNING", Tone::Success)
         } else {
             ("IDLE", Tone::Muted)
@@ -1597,7 +1602,7 @@ impl App {
             Span::styled("  |  runtime ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 runtime,
-                Style::default().fg(if matches!(self.send_state, SendState::Pending) {
+                Style::default().fg(if self.result_rx.is_some() {
                     Color::Green
                 } else {
                     Color::White
@@ -2112,7 +2117,7 @@ impl App {
             Span::raw(" "),
             Span::styled(
                 runtime,
-                Style::default().fg(if matches!(self.send_state, SendState::Pending) {
+                Style::default().fg(if self.result_rx.is_some() {
                     Color::Green
                 } else {
                     Color::Yellow
@@ -2353,7 +2358,7 @@ impl App {
     }
 
     fn events_panel_title(&self) -> Line<'static> {
-        let dot_color = if matches!(self.send_state, SendState::Pending) {
+        let dot_color = if self.result_rx.is_some() {
             Color::Green
         } else {
             Color::Yellow
@@ -2582,7 +2587,7 @@ impl App {
             return;
         }
 
-        if matches!(self.send_state, SendState::Pending) {
+        if self.result_rx.is_some() {
             self.life_field
                 .ensure_size(inner.width as usize * 2, inner.height as usize * 4);
             let lines = self
@@ -2978,7 +2983,6 @@ pub async fn run(
 ) -> Result<TuiOutcome> {
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<CrosstermEvent>();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<Result<String, String>>();
 
     agent.set_event_sink(EventSink::channel(event_tx));
     let agent = Arc::new(Mutex::new(agent));
@@ -3009,7 +3013,6 @@ pub async fn run(
         submit_prompt(
             prompt,
             agent.clone(),
-            result_tx.clone(),
             &mut app,
             &mut terminal,
         )?;
@@ -3020,59 +3023,73 @@ pub async fn run(
     let loop_result = async {
         while !app.quit {
             tokio::select! {
-                Some(event) = input_rx.recv() => {
+                event = input_rx.recv() => {
                     match event {
-                        CrosstermEvent::Key(key) => {
-                            match app.handle_key_event(key) {
-                                AppAction::Submit(prompt) => {
-                                    submit_prompt(prompt, agent.clone(), result_tx.clone(), &mut app, &mut terminal)?;
+                        Some(event) => match event {
+                            CrosstermEvent::Key(key) => {
+                                match app.handle_key_event(key) {
+                                    AppAction::Submit(prompt) => {
+                                        submit_prompt(prompt, agent.clone(), &mut app, &mut terminal)?;
+                                    }
+                                    AppAction::ResumeSession(session_id) => {
+                                        outcome = TuiOutcome::ResumeSession(session_id);
+                                        app.quit = true;
+                                    }
+                                    AppAction::Quit | AppAction::None => {}
                                 }
-                                AppAction::ResumeSession(session_id) => {
-                                    outcome = TuiOutcome::ResumeSession(session_id);
-                                    app.quit = true;
-                                }
-                                AppAction::Quit | AppAction::None => {}
                             }
+                            CrosstermEvent::Mouse(mouse) => {
+                                app.handle_mouse_event(mouse);
+                            }
+                            CrosstermEvent::Paste(text) => {
+                                let _ = app.handle_paste(&text);
+                            }
+                            CrosstermEvent::Resize(_, _) => {}
+                            _ => {}
+                        },
+                        None => {
+                            eprintln!("ERROR: input thread terminated unexpectedly, shutting down");
+                            app.quit = true;
                         }
-                        CrosstermEvent::Mouse(mouse) => {
-                            app.handle_mouse_event(mouse);
-                        }
-                        CrosstermEvent::Paste(text) => {
-                            let _ = app.handle_paste(&text);
-                        }
-                        CrosstermEvent::Resize(_, _) => {}
-                        _ => {}
                     }
                 }
                 Some(agent_event) = event_rx.recv() => {
                     app.apply_agent_event(agent_event);
                 }
-                Some(result) = result_rx.recv() => {
-                    let completed_duration = app
-                        .working_started_at
-                        .map(|started| started.elapsed())
-                        .unwrap_or_default();
-                    app.send_state = SendState::Idle;
-                    app.working_frame = 0;
-                    app.working_started_at = None;
-                    app.reset_life();
-                    if let Some(snapshot) = session_snapshot.as_mut() {
-                        let agent = agent.lock().await;
-                        persist_session_snapshot(snapshot, &agent)?;
+                result = async {
+                    match app.result_rx.as_mut() {
+                        Some(rx) => match rx.await {
+                            Ok(val) => Some(val),
+                            Err(_) => Some(Err("Internal error: agent task terminated unexpectedly".to_string())),
+                        },
+                        None => std::future::pending::<Option<Result<String, String>>>().await,
                     }
-                    match result {
-                        Ok(_) => {
-                            app.last_response_duration = completed_duration;
+                } => {
+                    if let Some(result) = result {
+                        let completed_duration = app
+                            .working_started_at
+                            .map(|started| started.elapsed())
+                            .unwrap_or_default();
+                        app.result_rx = None;
+                        app.working_frame = 0;
+                        app.working_started_at = None;
+                        app.reset_life();
+                        if let Some(snapshot) = session_snapshot.as_mut() {
+                            let agent = agent.lock().await;
+                            persist_session_snapshot(snapshot, &agent)?;
                         }
-                        Err(error) => {
-                            if !app.pending_error_reported {
+                        match result {
+                            Ok(_) => {
+                                app.last_response_duration = completed_duration;
+                            }
+                            Err(error) => {
                                 app.note_send_error(error);
                             }
                         }
                     }
                 }
                 _ = animation_tick.tick() => {
-                    if matches!(app.send_state, SendState::Pending) {
+                    if app.result_rx.is_some() {
                         app.working_frame = app.working_frame.wrapping_add(1);
                         app.advance_life();
                     }
@@ -3114,7 +3131,6 @@ pub async fn run(
 fn submit_prompt(
     prompt: String,
     agent: Arc<Mutex<Agent>>,
-    result_tx: mpsc::UnboundedSender<Result<String, String>>,
     app: &mut App,
     terminal: &mut UiTerminal,
 ) -> Result<()> {
@@ -3122,21 +3138,22 @@ fn submit_prompt(
     app.note_prompt_submitted(&prompt);
     app.current_prompt = prompt;
     app.clear_composer();
-    app.send_state = SendState::Pending;
-    app.pending_error_reported = false;
     app.working_frame = 0;
     app.working_started_at = Some(Instant::now());
     app.reset_life();
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.result_rx = Some(rx);
+
     tokio::spawn(async move {
         let result = {
             let mut agent = agent.lock().await;
-            agent
-                .send(&agent_prompt)
-                .await
-                .map_err(|error| error.to_string())
+            match tokio::time::timeout(WORKING_TIMEOUT, agent.send(&agent_prompt)).await {
+                Ok(send_result) => send_result.map_err(|error| error.to_string()),
+                Err(_elapsed) => Err("Request timed out after 10 minutes".to_string()),
+            }
         };
-        let _ = result_tx.send(result);
+        let _ = tx.send(result);
     });
 
     terminal.draw(|frame| app.render(frame))?;
