@@ -166,7 +166,8 @@ struct ThreadView {
     name: String,
     action: String,
     state: ThreadState,
-    updated_at: String,
+    updated_at: String,     // Human-readable display (e.g., "14:32:05")
+    updated_at_ts: u64,     // Unix timestamp for correct numeric sorting
     episodes: i64,
     summary: String,
 }
@@ -1018,6 +1019,7 @@ impl App {
         };
 
         for thread in threads {
+            let ts = parse_timestamp_to_unix(&thread.updated_at).unwrap_or_else(current_unix_ts);
             let entry = self
                 .threads
                 .entry(thread.name.clone())
@@ -1029,6 +1031,7 @@ impl App {
                         .unwrap_or_else(|| "retained history".to_string()),
                     state: ThreadState::Idle,
                     updated_at: short_clock(&thread.updated_at),
+                    updated_at_ts: ts,
                     episodes: thread.episode_count,
                     summary: format!("{} episode(s)", thread.episode_count),
                 });
@@ -1037,6 +1040,7 @@ impl App {
                     entry.action = action;
                 }
                 entry.updated_at = short_clock(&thread.updated_at);
+                entry.updated_at_ts = parse_timestamp_to_unix(&thread.updated_at).unwrap_or_else(current_unix_ts);
                 entry.episodes = thread.episode_count;
                 entry.summary = format!("{} episode(s)", thread.episode_count);
             }
@@ -1248,6 +1252,7 @@ impl App {
                         action: action.clone(),
                         state: ThreadState::Active,
                         updated_at: utc_hms(),
+                        updated_at_ts: current_unix_ts(),
                         episodes: self
                             .threads
                             .get(&name)
@@ -1285,11 +1290,13 @@ impl App {
                         action: "thread run".to_string(),
                         state: ThreadState::Idle,
                         updated_at: utc_hms(),
+                        updated_at_ts: current_unix_ts(),
                         episodes: 0,
                         summary: String::new(),
                     });
                 entry.state = ThreadState::Idle;
                 entry.updated_at = utc_hms();
+                entry.updated_at_ts = current_unix_ts();
                 entry.summary = if timed_out {
                     "timed out".to_string()
                 } else {
@@ -1328,6 +1335,7 @@ impl App {
                 Some(thread_name) => {
                     if let Some(thread) = self.threads.get_mut(&thread_name) {
                         thread.updated_at = utc_hms();
+                        thread.updated_at_ts = current_unix_ts();
                         thread.summary = truncate_episode_preview(&content);
                     }
                     self.hydrate_all_episodes();
@@ -1395,7 +1403,7 @@ impl App {
         threads.sort_by(|left, right| {
             matches!(right.state, ThreadState::Active)
                 .cmp(&matches!(left.state, ThreadState::Active))
-                .then_with(|| right.updated_at.cmp(&left.updated_at))
+                .then_with(|| right.updated_at_ts.cmp(&left.updated_at_ts))
                 .then_with(|| left.name.cmp(&right.name))
         });
         threads.into_iter().map(|t| t.name.clone()).collect()
@@ -2069,7 +2077,7 @@ impl App {
         threads.sort_by(|left, right| {
             matches!(right.state, ThreadState::Active)
                 .cmp(&matches!(left.state, ThreadState::Active))
-                .then_with(|| right.updated_at.cmp(&left.updated_at))
+                .then_with(|| right.updated_at_ts.cmp(&left.updated_at_ts))
                 .then_with(|| left.name.cmp(&right.name))
         });
 
@@ -4992,6 +5000,61 @@ fn utc_hms() -> String {
     let minutes = (rem % 3_600) / 60;
     let seconds = rem % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// Returns current Unix timestamp in seconds, for numeric thread sorting.
+fn current_unix_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Parse a timestamp string (format: "YYYY-MM-DD HH:MM:SS") to Unix timestamp.
+/// Returns None if parsing fails.
+fn parse_timestamp_to_unix(ts: &str) -> Option<u64> {
+    let parts: Vec<&str> = ts.split_whitespace().collect();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let date_parts: Vec<&str> = parts[0].split('-').collect();
+    let time_parts: Vec<&str> = parts[1].split(':').collect();
+
+    if date_parts.len() != 3 || time_parts.len() != 3 {
+        return None;
+    }
+
+    let year: u64 = date_parts[0].parse().ok()?;
+    let month: u64 = date_parts[1].parse().ok()?;
+    let day: u64 = date_parts[2].parse().ok()?;
+    let hour: u64 = time_parts[0].parse().ok()?;
+    let minute: u64 = time_parts[1].parse().ok()?;
+    let second: u64 = time_parts[2].parse().ok()?;
+
+    let mut days_since_epoch: u64 = 0;
+    for y in 1970..year {
+        days_since_epoch += if is_leap_year(y) { 366 } else { 365 };
+    }
+
+    let month_days = [
+        31,
+        if is_leap_year(year) { 29 } else { 28 },
+        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    ];
+    for m in 0..(month - 1) as usize {
+        days_since_epoch += month_days[m];
+    }
+    days_since_epoch += day - 1;
+
+    let secs_per_day: u64 = 86_400;
+    let secs_of_day = hour * 3_600 + minute * 60 + second;
+
+    Some(days_since_epoch * secs_per_day + secs_of_day)
+}
+
+fn is_leap_year(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 fn tone_glyph(tone: Tone) -> &'static str {
