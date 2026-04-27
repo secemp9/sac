@@ -1758,7 +1758,7 @@ impl App {
             for line in prompt_lines {
                 lines.push(Line::from(Span::styled(
                     line,
-                    Style::default().fg(Color::White),
+                    Style::default().fg(Color::DarkGray),
                 )));
             }
         } else {
@@ -2022,7 +2022,10 @@ impl App {
         });
 
         if threads.is_empty() {
-            lines.push(Line::from("No threads in this session yet."));
+            lines.push(Line::from(Span::styled(
+                "No threads in this session yet.",
+                Style::default().fg(Color::DarkGray),
+            )));
         } else {
             for thread in threads {
                 let name = fit_text(&thread.name, thread_width);
@@ -2088,7 +2091,10 @@ impl App {
                     }
                 }
             }
-            None => vec![Line::from("Waiting for the first orchestrator reply.")],
+            None => vec![Line::from(Span::styled(
+                "Waiting for the first orchestrator reply.",
+                Style::default().fg(Color::DarkGray),
+            ))],
         };
         let runtime = format_runtime(self.displayed_run_duration());
         let title = panel_title_segments(vec![
@@ -2114,7 +2120,10 @@ impl App {
     fn render_previous_response_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let lines = match self.previous_response.as_deref() {
             Some(response) => render_markdown_lines(response),
-            None => vec![Line::from("No previous orchestrator reply yet.")],
+            None => vec![Line::from(Span::styled(
+                "No previous orchestrator reply yet.",
+                Style::default().fg(Color::DarkGray),
+            ))],
         };
         self.render_selectable_rich_panel(
             frame,
@@ -2210,7 +2219,10 @@ impl App {
         }
 
         if lines.is_empty() {
-            lines.push(Line::from("No threads yet"));
+            lines.push(Line::from(Span::styled(
+                "No threads yet",
+                Style::default().fg(Color::DarkGray),
+            )));
         }
 
         self.render_scrollable_lines_panel_with_title(
@@ -2230,25 +2242,44 @@ impl App {
 
         let thread_name = self.selected_thread.as_deref().unwrap_or("none");
 
-        let mut combined = String::new();
-
-        if let Some(thread) = self
-            .selected_thread
-            .as_ref()
-            .and_then(|name| self.threads.get(name))
-        {
-            combined.push_str(&format!("# Thread: {}\n", thread.name));
-            combined.push_str(&format!(
-                "Action: {}  |  Episodes: {}  |  State: {:?}  |  Updated: {}\n",
-                thread.action, thread.episodes, thread.state, thread.updated_at
-            ));
-            combined.push_str("\n---\n\n");
-        }
-
-        if let Some(eps) = episodes {
+        // Build lines, bypassing the markdown pipeline and cache for empty states
+        // so that placeholder messages use the muted DarkGray style.
+        let lines: Vec<Line<'static>> = if let Some(eps) = episodes {
             if eps.is_empty() {
-                combined.push_str("*No episodes yet.*\n");
+                let mut lines = Vec::new();
+                if let Some(thread) = self
+                    .selected_thread
+                    .as_ref()
+                    .and_then(|name| self.threads.get(name))
+                {
+                    let mut header = String::new();
+                    header.push_str(&format!("# Thread: {}\n", thread.name));
+                    header.push_str(&format!(
+                        "Action: {}  |  Episodes: {}  |  State: {:?}  |  Updated: {}\n",
+                        thread.action, thread.episodes, thread.state, thread.updated_at
+                    ));
+                    header.push_str("\n---\n\n");
+                    lines.extend(render_markdown_lines(&header));
+                }
+                lines.push(Line::from(Span::styled(
+                    "No episodes yet.",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines
             } else {
+                let mut combined = String::new();
+                if let Some(thread) = self
+                    .selected_thread
+                    .as_ref()
+                    .and_then(|name| self.threads.get(name))
+                {
+                    combined.push_str(&format!("# Thread: {}\n", thread.name));
+                    combined.push_str(&format!(
+                        "Action: {}  |  Episodes: {}  |  State: {:?}  |  Updated: {}\n",
+                        thread.action, thread.episodes, thread.state, thread.updated_at
+                    ));
+                    combined.push_str("\n---\n\n");
+                }
                 for (i, ep) in eps.iter().enumerate() {
                     combined.push_str(&format!(
                         "### Episode {} | {} | action: {}\n\n",
@@ -2261,21 +2292,42 @@ impl App {
                         combined.push_str("\n\n---\n\n");
                     }
                 }
+                match self.episode_markdown_cache.get(thread_name) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let rendered = render_markdown_lines(&combined);
+                        self.episode_markdown_cache
+                            .insert(thread_name.to_string(), rendered.clone());
+                        rendered
+                    }
+                }
             }
         } else if self.selected_thread.is_some() {
-            combined.push_str("*Thread is running... no episodes yet.*\n");
-        } else {
-            combined.push_str("*Select a thread to view episodes.*\n");
-        }
-
-        let markdown_lines = match self.episode_markdown_cache.get(thread_name) {
-            Some(cached) => cached.clone(),
-            None => {
-                let lines = render_markdown_lines(&combined);
-                self.episode_markdown_cache
-                    .insert(thread_name.to_string(), lines.clone());
-                lines
+            let mut lines = Vec::new();
+            if let Some(thread) = self
+                .selected_thread
+                .as_ref()
+                .and_then(|name| self.threads.get(name))
+            {
+                let mut header = String::new();
+                header.push_str(&format!("# Thread: {}\n", thread.name));
+                header.push_str(&format!(
+                    "Action: {}  |  Episodes: {}  |  State: {:?}  |  Updated: {}\n",
+                    thread.action, thread.episodes, thread.state, thread.updated_at
+                ));
+                header.push_str("\n---\n\n");
+                lines.extend(render_markdown_lines(&header));
             }
+            lines.push(Line::from(Span::styled(
+                "Thread is running... no episodes yet.",
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines
+        } else {
+            vec![Line::from(Span::styled(
+                "Select a thread to view episodes.",
+                Style::default().fg(Color::DarkGray),
+            ))]
         };
         let title = panel_title_segments(vec![
             Span::styled(
@@ -2291,7 +2343,7 @@ impl App {
             area,
             PanelId::ThreadEpisodes,
             title,
-            markdown_lines,
+            lines,
         );
     }
 
@@ -2342,10 +2394,10 @@ impl App {
                 Span::raw(" "),
                 Span::raw(pad_cell(&fit_text(&label, tool_width), tool_width)),
                 Span::raw(" "),
-                Span::raw(pad_cell(
-                    &fit_text(&tool.target, target_width),
-                    target_width,
-                )),
+                Span::styled(
+                    pad_cell(&fit_text(&tool.target, target_width), target_width),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::raw(" "),
                 Span::styled(
                     pad_cell(&format_duration(tool.started_at.elapsed()), duration_width),
@@ -2367,10 +2419,10 @@ impl App {
                 Span::raw(" "),
                 Span::raw(pad_cell(&fit_text(&label, tool_width), tool_width)),
                 Span::raw(" "),
-                Span::raw(pad_cell(
-                    &fit_text(&tool.target, target_width),
-                    target_width,
-                )),
+                Span::styled(
+                    pad_cell(&fit_text(&tool.target, target_width), target_width),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::raw(" "),
                 Span::styled(
                     pad_cell(&format_duration(tool.duration), duration_width),
@@ -2380,7 +2432,10 @@ impl App {
         }
 
         if lines.len() == 1 {
-            lines.push(Line::from("No tool activity yet."));
+            lines.push(Line::from(Span::styled(
+                "No tool activity yet.",
+                Style::default().fg(Color::DarkGray),
+            )));
         }
 
         render_lines_panel(frame, area, "TOOLS", lines);
@@ -2411,7 +2466,7 @@ impl App {
             )));
         } else if self.worksets.items.is_empty() {
             lines.push(Line::from(Span::styled(
-                "No worksets yet. Try /batch, /batch-run, /plan, or /review.",
+                "No worksets yet.",
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
