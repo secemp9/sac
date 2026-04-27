@@ -1876,7 +1876,7 @@ impl App {
         if threads.is_empty() {
             lines.push(Line::from("No threads in this session yet."));
         } else {
-            for thread in threads.into_iter().take(6) {
+            for thread in threads {
                 let name = fit_text(&thread.name, thread_width);
                 let action = fit_text(&thread.action, action_width);
                 let updated = fit_text(&thread.updated_at, updated_width);
