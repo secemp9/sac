@@ -683,19 +683,25 @@ fn build_worker_context_messages(
 }
 
 async fn commit_managed_worker(worker: &ManagedWorkerConfig, response: &str) -> Result<()> {
-    store::append_episode(
-        &worker.store_path,
-        &worker.session_id,
-        &worker.thread_name,
-        &worker.action,
-        response,
-    )?;
+    let path = worker.store_path.clone();
+    let sid = worker.session_id.clone();
+    let thread = worker.thread_name.clone();
+    let action = worker.action.clone();
+    let response = response.to_string();
+    tokio::task::spawn_blocking(move || {
+        store::append_episode(&path, &sid, &thread, &action, &response)
+    })
+    .await??;
     Ok(())
 }
 
-fn persist_session_snapshot(snapshot: &mut SessionSnapshot, agent: &Agent) -> Result<()> {
+async fn persist_session_snapshot(snapshot: &mut SessionSnapshot, agent: &Agent) -> Result<()> {
     let refreshed = sessions::refresh_snapshot(snapshot, agent.messages.clone());
-    sessions::save_session(&refreshed)?;
+    let snapshot_for_blocking = refreshed.clone();
+    tokio::task::spawn_blocking(move || {
+        sessions::save_session(&snapshot_for_blocking)
+    })
+    .await??;
     *snapshot = refreshed;
     Ok(())
 }
@@ -707,7 +713,7 @@ async fn run_non_tui(run_config: RunConfig) -> Result<()> {
     if let Some(prompt) = run_config.initial_prompt {
         let send_result = agent.send(&prompt).await;
         if let Some(snapshot) = session_snapshot.as_mut() {
-            persist_session_snapshot(snapshot, &agent)?;
+            persist_session_snapshot(snapshot, &agent).await?;
         }
         let response = send_result?;
         if let Some(worker) = &run_config.managed_worker {
@@ -740,7 +746,7 @@ async fn run_non_tui(run_config: RunConfig) -> Result<()> {
 
         let send_result = agent.send(input).await;
         if let Some(snapshot) = session_snapshot.as_mut() {
-            persist_session_snapshot(snapshot, &agent)?;
+            persist_session_snapshot(snapshot, &agent).await?;
         }
 
         match send_result {

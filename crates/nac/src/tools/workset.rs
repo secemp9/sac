@@ -118,17 +118,24 @@ pub async fn execute_define(args: Value, runtime: &ToolRuntime) -> ToolResult {
         items,
     };
 
-    match store::define_workset(&runtime.store_path, &session_id, &definition) {
-        Ok(()) => ToolResult {
-            content: format!(
-                "Saved workset '{}' with {} item(s).",
-                id,
-                definition.items.len()
-            ),
+    let store_path = runtime.store_path.clone();
+    let sid = session_id.clone();
+    let items_len = definition.items.len();
+    match tokio::task::spawn_blocking(move || {
+        store::define_workset(&store_path, &sid, &definition)
+    })
+    .await
+    {
+        Ok(Ok(())) => ToolResult {
+            content: format!("Saved workset '{}' with {} item(s).", id, items_len),
             is_error: false,
         },
-        Err(error) => ToolResult {
+        Ok(Err(error)) => ToolResult {
             content: format!("Error saving workset '{}': {}", id, error),
+            is_error: true,
+        },
+        Err(join_error) => ToolResult {
+            content: format!("Internal error saving workset '{}': {}", id, join_error),
             is_error: true,
         },
     }
@@ -144,17 +151,28 @@ pub async fn execute_read(args: Value, runtime: &ToolRuntime) -> ToolResult {
         Err(error) => return error,
     };
 
-    match store::read_workset(&runtime.store_path, &session_id, &id) {
-        Ok(Some(workset)) => ToolResult {
+    let store_path = runtime.store_path.clone();
+    let sid = session_id.clone();
+    let wid = id.clone();
+    match tokio::task::spawn_blocking(move || {
+        store::read_workset(&store_path, &sid, &wid)
+    })
+    .await
+    {
+        Ok(Ok(Some(workset))) => ToolResult {
             content: store::render_workset_document(&workset),
             is_error: false,
         },
-        Ok(None) => ToolResult {
+        Ok(Ok(None)) => ToolResult {
             content: format!("Workset '{}' does not exist in this session.", id),
             is_error: true,
         },
-        Err(error) => ToolResult {
+        Ok(Err(error)) => ToolResult {
             content: format!("Error reading workset '{}': {}", id, error),
+            is_error: true,
+        },
+        Err(join_error) => ToolResult {
+            content: format!("Internal error reading workset '{}': {}", id, join_error),
             is_error: true,
         },
     }
@@ -170,13 +188,24 @@ pub async fn execute_list(args: Value, runtime: &ToolRuntime) -> ToolResult {
         Err(error) => return error,
     };
 
-    match store::list_worksets(&runtime.store_path, &session_id, kind.as_deref()) {
-        Ok(worksets) => ToolResult {
+    let store_path = runtime.store_path.clone();
+    let sid = session_id.clone();
+    let filter_kind = kind.clone();
+    match tokio::task::spawn_blocking(move || {
+        store::list_worksets(&store_path, &sid, filter_kind.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(worksets)) => ToolResult {
             content: store::render_workset_list(&worksets),
             is_error: false,
         },
-        Err(error) => ToolResult {
+        Ok(Err(error)) => ToolResult {
             content: format!("Error listing worksets: {}", error),
+            is_error: true,
+        },
+        Err(join_error) => ToolResult {
+            content: format!("Internal error listing worksets: {}", join_error),
             is_error: true,
         },
     }
