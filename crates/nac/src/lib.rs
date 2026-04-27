@@ -7,6 +7,7 @@ pub mod events;
 pub mod life;
 pub mod mcp;
 pub mod paths;
+pub mod process;
 pub mod sandbox;
 pub mod sessions;
 pub mod skills;

@@ -8,6 +8,7 @@ use tokio::time::timeout;
 
 use crate::api::ModelClient;
 use crate::events::{decode_stderr_event, AgentEvent};
+use crate::process::{isolate_process_group, terminate_child_tree};
 use crate::store;
 use crate::tools::{require_str, require_string_array, ToolResult, ToolRuntime};
 use crate::types::ToolDefinition;
@@ -407,6 +408,7 @@ async fn run_worker(
     if let Some(sandbox) = &runtime.sandbox {
         command.args(sandbox.worker_cli_args());
     }
+    isolate_process_group(&mut command);
 
     let mut child = command.spawn()?;
 
@@ -451,8 +453,7 @@ async fn run_worker(
     let status = timeout(Duration::from_secs(timeout_secs), child.wait()).await;
     let timed_out = status.is_err();
     if timed_out {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        terminate_child_tree(&mut child).await;
     }
 
     let stderr = stderr_handle.await.unwrap_or_default();
