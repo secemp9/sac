@@ -9,10 +9,12 @@ use crate::events::EventSink;
 use crate::mcp::McpRegistry;
 use crate::sandbox::SandboxSession;
 use crate::skills::SkillRegistry;
+use crate::terminal::TerminalManager;
 use crate::types::ToolDefinition;
 
 pub mod bash;
 pub mod edit;
+pub mod exec_command;
 pub mod read;
 pub mod thread;
 pub mod workset;
@@ -33,6 +35,7 @@ pub struct ToolRuntime {
     pub mcp: Option<Arc<McpRegistry>>,
     pub skills: Option<Arc<SkillRegistry>>,
     pub activated_skills: Arc<Mutex<HashSet<String>>>,
+    pub terminal_manager: TerminalManager,
 }
 
 static WRITE_LOCK: Mutex<()> = Mutex::const_new(());
@@ -44,7 +47,7 @@ pub async fn acquire_write_lock() -> tokio::sync::MutexGuard<'static, ()> {
 pub fn worker_tool_definitions() -> Vec<ToolDefinition> {
     use serde_json::json;
 
-    vec![
+    let mut tools = vec![
         def(
             "read",
             "Read file contents with line numbers. Supports offset and limit.",
@@ -85,7 +88,7 @@ pub fn worker_tool_definitions() -> Vec<ToolDefinition> {
         ),
         def(
             "bash",
-            "Execute a shell command and return output.",
+            "Execute a shell command and return output. For one-shot commands. For interactive or multi-step shell work, prefer exec_command with tty=true instead.",
             json!({
                 "type": "object",
                 "properties": {
@@ -95,7 +98,12 @@ pub fn worker_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["command"]
             }),
         ),
-    ]
+    ];
+
+    tools.push(exec_command::exec_command_definition());
+    tools.push(exec_command::write_stdin_definition());
+
+    tools
 }
 
 pub fn orchestrator_tool_definitions() -> Vec<ToolDefinition> {
@@ -179,6 +187,18 @@ pub async fn execute_tool(
         "write" => write::execute(args, runtime).await,
         "edit" => edit::execute(args, runtime).await,
         "bash" => bash::execute(args, runtime).await,
+        "exec_command" => {
+            match exec_command::execute_exec_command(&args, runtime) {
+                Ok(content) => ToolResult { content, is_error: false },
+                Err(e) => ToolResult { content: format!("Error: {:#}", e), is_error: true },
+            }
+        }
+        "write_stdin" => {
+            match exec_command::execute_write_stdin(&args, runtime) {
+                Ok(content) => ToolResult { content, is_error: false },
+                Err(e) => ToolResult { content: format!("Error: {:#}", e), is_error: true },
+            }
+        }
         "thread" => thread::execute_dispatch(args, runtime, client).await,
         "threads" => thread::execute_threads(runtime).await,
         "thread_read" => thread::execute_thread_read(args, runtime).await,

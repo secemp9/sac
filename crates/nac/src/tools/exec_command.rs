@@ -1,0 +1,342 @@
+//! Terminal-backed command execution tools: `exec_command` and `write_stdin`.
+
+use anyhow::{anyhow, Result};
+use serde_json::Value;
+use std::path::PathBuf;
+
+use crate::tools::ToolRuntime;
+use crate::types::{FunctionDef, ToolDefinition};
+
+// ============================================================================
+// exec_command
+// ============================================================================
+
+pub fn exec_command_definition() -> ToolDefinition {
+    ToolDefinition {
+        def_type: "function".to_string(),
+        function: FunctionDef {
+            name: "exec_command".to_string(),
+            description: "Execute a shell command.\n\n\
+Use tty=false (default) for one-shot commands like `cargo build`, `npm test`, `git status`, `ls`, etc. \
+The command runs to completion and returns output + exit code.\n\n\
+Use tty=true for:\n\
+- Interactive REPLs (python, node, etc.)\n\
+- Long-running multi-step workflows where you need shell state to persist across calls \
+(cd into a directory, set env vars, then run commands)\n\
+- When you need more than one command in the same shell session\n\n\
+When tty=true, you get a session_name back. Use write_stdin to continue interacting with that session.\n\n\
+Python REPL note: if you use python interactively, multi-line definitions with \
+indentation will compound (auto-indent adds to pre-indented text). Use \
+exec('''...''') to run multi-line blocks instead."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cmd": { "type": "string", "description": "Shell command to execute" },
+                    "workdir": { "type": "string", "description": "Working directory for the command (default: project root)" },
+                    "tty": { "type": "boolean", "description": "Allocate a PTY for interactive/persistent use (default: false)" },
+                    "yield_time_ms": { "type": "number", "description": "Maximum time to wait for output in milliseconds (default: 500, max: 30000)" },
+                    "max_output_chars": { "type": "number", "description": "Maximum characters of output to return (default: 8000, head-tail truncated if exceeded)" }
+                },
+                "required": ["cmd"]
+            }),
+        },
+    }
+}
+
+pub fn execute_exec_command(args: &Value, runtime: &ToolRuntime) -> Result<String> {
+    let manager = &runtime.terminal_manager;
+    let cmd = require_str(args, "cmd")?;
+    let tty = args.get("tty").and_then(|v| v.as_bool()).unwrap_or(false);
+    let yield_ms = clamp_yield(args.get("yield_time_ms").and_then(|v| v.as_u64()).unwrap_or(500));
+    let max_output = args.get("max_output_chars").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
+    let cwd = args.get("workdir").and_then(|v| v.as_str()).map(PathBuf::from);
+
+    if !tty {
+        let output = manager.exec_one_shot(&cmd, cwd, 120, 40, yield_ms, max_output, runtime.sandbox.as_ref())?;
+        return Ok(serde_json::to_string_pretty(&output)?);
+    }
+
+    let session_name = make_session_name();
+    let _info = manager.create(session_name.clone(), cwd, 120, 40, runtime.sandbox.as_ref())?;
+
+    if cmd.trim().is_empty() {
+        let output = manager.write_stdin(&session_name, "", 200, max_output)?;
+        let alive = manager.get(&session_name).map(|i| i.alive).unwrap_or(false);
+        if !alive {
+            let _ = manager.remove(&session_name);
+            return Ok(serde_json::to_string_pretty(&serde_json::json!({
+                "output": output.output,
+                "exit_code": output.exit_code,
+                "session_name": null,
+                "wall_time_ms": output.wall_time_ms,
+                "output_truncated": output.output_truncated,
+            }))?);
+        }
+        return Ok(serde_json::to_string_pretty(&output)?);
+    }
+
+    let output = manager.write_stdin(&session_name, &format!("{}\n", cmd), yield_ms, max_output)?;
+    let alive = manager.get(&session_name).map(|i| i.alive).unwrap_or(false);
+    if !alive {
+        let _ = manager.remove(&session_name);
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "output": output.output,
+            "exit_code": output.exit_code,
+            "session_name": null,
+            "wall_time_ms": output.wall_time_ms,
+            "output_truncated": output.output_truncated,
+        }))?);
+    }
+    Ok(serde_json::to_string_pretty(&output)?)
+}
+
+// ============================================================================
+// write_stdin
+// ============================================================================
+
+pub fn write_stdin_definition() -> ToolDefinition {
+    ToolDefinition {
+        def_type: "function".to_string(),
+        function: FunctionDef {
+            name: "write_stdin".to_string(),
+            description: "Send input to a persistent terminal session created by exec_command with tty=true. \
+Also use this to poll for output by sending empty input.\n\n\
+Supports key notation: <RET> (Enter), <C-c> (Ctrl+C), <C-d> (Ctrl+D), <TAB>, <BSPC> (Backspace), \
+<UP>/<DOWN>/<LEFT>/<RIGHT>.\n\n\
+Note: in less, prefer j/k for scrolling. Arrow keys may not work in all programs.\n
+Python REPL: for multi-line blocks, use exec('''...''') to avoid indentation compounding."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Session ID returned by exec_command" },
+                    "chars": { "type": "string", "description": "Input to send to the terminal. Supports key notation: <RET>, <C-c>, <C-d>, <TAB>, <BSPC>, <UP>/<DOWN>/<LEFT>/<RIGHT>. Leave empty to just poll for output." },
+                    "yield_time_ms": { "type": "number", "description": "Maximum time to wait for output in milliseconds (default: 500)" },
+                    "max_output_chars": { "type": "number", "description": "Maximum characters of output to return (default: 8000)" }
+                },
+                "required": ["session_id"]
+            }),
+        },
+    }
+}
+
+pub fn execute_write_stdin(args: &Value, runtime: &ToolRuntime) -> Result<String> {
+    let manager = &runtime.terminal_manager;
+    let session_id = require_str(args, "session_id")?;
+    let chars = args.get("chars").and_then(|v| v.as_str()).unwrap_or("");
+    let yield_ms = clamp_yield(args.get("yield_time_ms").and_then(|v| v.as_u64()).unwrap_or(500));
+    let max_output = args.get("max_output_chars").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
+
+    if manager.get(&session_id).is_none() {
+        return Err(anyhow!(
+            "terminal session '{}' not found — it may have been closed or expired",
+            session_id
+        ));
+    }
+
+    let output = manager.write_stdin(&session_id, chars, yield_ms, max_output)?;
+    let alive = manager.get(&session_id).map(|i| i.alive).unwrap_or(false);
+    if !alive {
+        let _ = manager.remove(&session_id);
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "output": output.output,
+            "exit_code": output.exit_code,
+            "session_name": null,
+            "wall_time_ms": output.wall_time_ms,
+            "output_truncated": output.output_truncated,
+            "note": "session ended; session_name cleared",
+        }))?);
+    }
+    Ok(serde_json::to_string_pretty(&output)?)
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn require_str(args: &Value, key: &str) -> Result<String> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("missing required argument '{}'", key))
+}
+
+fn clamp_yield(ms: u64) -> u64 {
+    if ms > 30_000 { 30_000 } else { ms }
+}
+
+fn make_session_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!("shell-{}", n)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::EventSink;
+    use serde_json::json;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn test_runtime() -> ToolRuntime {
+        ToolRuntime {
+            store_path: PathBuf::new(),
+            session_id: None,
+            active_threads: Arc::new(Mutex::new(HashSet::new())),
+            event_sink: EventSink::none(),
+            sandbox: None,
+            mcp: None,
+            skills: None,
+            activated_skills: Arc::new(Mutex::new(HashSet::new())),
+            terminal_manager: crate::terminal::TerminalManager::new(),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // exec_command
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn exec_command_definition_shape() {
+        let def = exec_command_definition();
+        assert_eq!(def.function.name, "exec_command");
+        assert!(def.function.description.contains("tty=true"));
+        assert!(def.function.parameters.get("required").and_then(|v| v.as_array()).is_some());
+    }
+
+    #[test]
+    fn exec_command_missing_cmd_fails() {
+        let result = execute_exec_command(&json!({}), &test_runtime());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing required argument"));
+    }
+
+    #[test]
+    fn exec_command_one_shot_echo() {
+        let result = execute_exec_command(
+            &json!({ "cmd": "echo hello-world", "tty": false, "yield_time_ms": 2000 }),
+            &test_runtime(),
+        );
+        assert!(result.is_ok(), "error: {:?}", result.err());
+        let output = result.unwrap();
+        assert!(output.contains("hello-world"), "got: {}", output);
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed["session_name"].is_null());
+    }
+
+    #[test]
+    fn exec_command_one_shot_multiline() {
+        let result = execute_exec_command(
+            &json!({ "cmd": "echo line1 && echo line2", "tty": false, "yield_time_ms": 2000 }),
+            &test_runtime(),
+        );
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.contains("line1") && output.contains("line2"), "got: {}", output);
+    }
+
+    #[test]
+    fn exec_command_persistent_creates_session() {
+        let result = execute_exec_command(
+            &json!({ "cmd": "echo persistent-test", "tty": true, "yield_time_ms": 2000 }),
+            &test_runtime(),
+        );
+        assert!(result.is_ok(), "error: {:?}", result.err());
+        let output = result.unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        let session_name = parsed["session_name"].as_str().unwrap();
+        assert!(session_name.starts_with("shell-"), "got: {}", session_name);
+        assert!(output.contains("persistent-test"), "got: {}", output);
+    }
+
+    #[test]
+    fn exec_command_persistent_empty_cmd() {
+        let result = execute_exec_command(
+            &json!({ "cmd": "", "tty": true, "yield_time_ms": 2000 }),
+            &test_runtime(),
+        );
+        assert!(result.is_ok(), "error: {:?}", result.err());
+        let parsed: Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert!(parsed["session_name"].is_string());
+    }
+
+    // ------------------------------------------------------------------
+    // write_stdin
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn write_stdin_definition_shape() {
+        let def = write_stdin_definition();
+        assert_eq!(def.function.name, "write_stdin");
+        let required = def.function.parameters.get("required").and_then(|v| v.as_array()).unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("session_id")));
+    }
+
+    #[test]
+    fn write_stdin_missing_session_id_fails() {
+        assert!(execute_write_stdin(&json!({}), &test_runtime()).is_err());
+    }
+
+    #[test]
+    fn write_stdin_session_not_found() {
+        let result = execute_write_stdin(
+            &json!({ "session_id": "nonexistent", "chars": "echo hi<RET>" }),
+            &test_runtime(),
+        );
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn write_stdin_poll_output() {
+        let runtime = test_runtime();
+        runtime.terminal_manager.create("test-poll".to_string(), None, 120, 40, None).unwrap();
+        runtime.terminal_manager.write_stdin("test-poll", "echo poll-me\n", 2000, 8000).unwrap();
+        let result = execute_write_stdin(
+            &json!({ "session_id": "test-poll", "chars": "", "yield_time_ms": 500 }),
+            &runtime,
+        );
+        assert!(result.is_ok(), "error: {:?}", result.err());
+        runtime.terminal_manager.remove("test-poll").ok();
+    }
+
+    #[test]
+    fn write_stdin_send_input() {
+        let runtime = test_runtime();
+        runtime.terminal_manager.create("test-input".to_string(), None, 120, 40, None).unwrap();
+        let result = execute_write_stdin(
+            &json!({ "session_id": "test-input", "chars": "echo from-stdin<RET>", "yield_time_ms": 2000 }),
+            &runtime,
+        );
+        assert!(result.is_ok(), "error: {:?}", result.err());
+        assert!(result.unwrap().contains("from-stdin"));
+        runtime.terminal_manager.remove("test-input").ok();
+    }
+
+    // ------------------------------------------------------------------
+    // helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn clamp_yield_edge() {
+        assert_eq!(clamp_yield(0), 0);
+        assert_eq!(clamp_yield(15_000), 15_000);
+        assert_eq!(clamp_yield(60_000), 30_000);
+    }
+
+    #[test]
+    fn make_session_name_increments() {
+        let a = make_session_name();
+        let b = make_session_name();
+        assert_ne!(a, b);
+        assert!(a.starts_with("shell-"));
+        assert!(b.starts_with("shell-"));
+    }
+}

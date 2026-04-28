@@ -83,7 +83,14 @@ impl Agent {
                      Avoid creating extra Markdown documents or notes files unless the user explicitly \
                      asks for them.\n\
                      Do not dump raw tool traces. Do not restate borrowed context unless it materially affected \
-                     the outcome of this dispatch.",
+                     the outcome of this dispatch.\n\n\
+                     You have access to a persistent terminal via exec_command and write_stdin.\n\
+                     - Use exec_command with tty=false for quick one-shot commands.\n\
+                     - Use exec_command with tty=true to create a persistent shell session. You'll get a session_name back.\n\
+                     - Use write_stdin to send input to that session and read output.\n\
+                     - Persistent shells keep state (cwd, env vars, venvs, etc.) across calls. Use them for multi-step workflows.\n\
+                     - Always prefer write_stdin with empty chars to poll for output from a running command before sending new input.\n\
+                     - Close sessions by sending exit<RET> or <C-d>. Sessions auto-cleanup when the worker finishes.",
                     cwd
                 ),
                 tools::worker_tool_definitions(),
@@ -202,6 +209,7 @@ impl Agent {
                 mcp: config.mcp,
                 skills: config.skills,
                 activated_skills: Arc::new(Mutex::new(HashSet::new())),
+                terminal_manager: crate::terminal::TerminalManager::new(),
             },
             event_sink: config.event_sink,
             thread_name: config.thread_name,
@@ -258,6 +266,7 @@ impl Agent {
                         thread_name: self.thread_name.clone(),
                         message: error.to_string(),
                     });
+                    self.tool_runtime.terminal_manager.remove_all();
                     return Err(error);
                 }
             };
@@ -269,6 +278,7 @@ impl Agent {
                     thread_name: self.thread_name.clone(),
                     message: error.to_string(),
                 });
+                self.tool_runtime.terminal_manager.remove_all();
                 return Err(error);
             }
 
@@ -298,6 +308,7 @@ impl Agent {
                 self.emit(AgentEvent::RunFinished {
                     thread_name: self.thread_name.clone(),
                 });
+                self.tool_runtime.terminal_manager.remove_all();
                 return Ok(content);
             }
 
