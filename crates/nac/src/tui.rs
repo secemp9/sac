@@ -4592,25 +4592,60 @@ fn render_inline_markdown(text: &str, base_style: Style) -> Vec<Span<'static>> {
             continue;
         }
 
+        // Three-char delimiter: ___text___ or ***text*** → bold+italic
+        // Must be exactly 3 of the same char (not 4+, which falls through to two-char bold).
+        if index + 2 < chars.len()
+            && chars[index] == chars[index + 1]
+            && chars[index + 1] == chars[index + 2]
+            && matches!(chars[index], '*' | '_')
+            && (index + 3 >= chars.len() || chars[index + 3] != chars[index])
+        {
+            let can_open = is_left_flanking(&chars, index, 3)
+                && (chars[index] != '_' || !is_right_flanking(&chars, index, 3));
+            if can_open {
+                if let Some(close_index) =
+                    find_closing_marker(&chars, index + 3, &[chars[index]; 3], true)
+                {
+                    push_styled_text(&mut spans, &mut buffer, base_style);
+                    let inner: String = chars[index + 3..close_index].iter().collect();
+                    spans.extend(render_inline_markdown(
+                        &inner,
+                        base_style
+                            .add_modifier(Modifier::BOLD)
+                            .add_modifier(Modifier::ITALIC),
+                    ));
+                    index = close_index + 3;
+                    continue;
+                }
+            }
+        }
+
         if index + 1 < chars.len()
             && matches!((chars[index], chars[index + 1]), ('*', '*') | ('_', '_'))
         {
-            if let Some(close_index) =
-                find_closing_marker(&chars, index + 2, &[chars[index], chars[index + 1]])
-            {
-                push_styled_text(&mut spans, &mut buffer, base_style);
-                let inner: String = chars[index + 2..close_index].iter().collect();
-                spans.extend(render_inline_markdown(
-                    &inner,
-                    base_style.add_modifier(Modifier::BOLD),
-                ));
-                index = close_index + 2;
-                continue;
+            let can_open = is_left_flanking(&chars, index, 2)
+                && (chars[index] != '_' || !is_right_flanking(&chars, index, 2));
+            if can_open {
+                if let Some(close_index) = find_closing_marker(
+                    &chars,
+                    index + 2,
+                    &[chars[index], chars[index + 1]],
+                    true,
+                ) {
+                    push_styled_text(&mut spans, &mut buffer, base_style);
+                    let inner: String = chars[index + 2..close_index].iter().collect();
+                    spans.extend(render_inline_markdown(
+                        &inner,
+                        base_style.add_modifier(Modifier::BOLD),
+                    ));
+                    index = close_index + 2;
+                    continue;
+                }
             }
         }
 
         if index + 1 < chars.len() && chars[index] == '~' && chars[index + 1] == '~' {
-            if let Some(close_index) = find_closing_marker(&chars, index + 2, &['~', '~']) {
+            if let Some(close_index) = find_closing_marker(&chars, index + 2, &['~', '~'], false) {
                 push_styled_text(&mut spans, &mut buffer, base_style);
                 let inner: String = chars[index + 2..close_index].iter().collect();
                 spans.extend(render_inline_markdown(
@@ -4623,15 +4658,28 @@ fn render_inline_markdown(text: &str, base_style: Style) -> Vec<Span<'static>> {
         }
 
         if matches!(chars[index], '*' | '_') {
-            if let Some(close_index) = find_closing_marker(&chars, index + 1, &[chars[index]]) {
-                push_styled_text(&mut spans, &mut buffer, base_style);
-                let inner: String = chars[index + 1..close_index].iter().collect();
-                spans.extend(render_inline_markdown(
-                    &inner,
-                    base_style.add_modifier(Modifier::ITALIC),
-                ));
-                index = close_index + 1;
+            // Don't treat as a single-char delimiter if part of a multi-char run
+            // (e.g. the second '_' in '__'). The multi-char checks above handle those.
+            if index > 0 && chars[index - 1] == chars[index] {
+                buffer.push(chars[index]);
+                index += 1;
                 continue;
+            }
+            let can_open = is_left_flanking(&chars, index, 1)
+                && (chars[index] != '_' || !is_right_flanking(&chars, index, 1));
+            if can_open {
+                if let Some(close_index) =
+                    find_closing_marker(&chars, index + 1, &[chars[index]], true)
+                {
+                    push_styled_text(&mut spans, &mut buffer, base_style);
+                    let inner: String = chars[index + 1..close_index].iter().collect();
+                    spans.extend(render_inline_markdown(
+                        &inner,
+                        base_style.add_modifier(Modifier::ITALIC),
+                    ));
+                    index = close_index + 1;
+                    continue;
+                }
             }
         }
 
@@ -4702,8 +4750,8 @@ fn render_markdown_heading_line(level: usize, content: &str) -> Line<'static> {
         markdown_heading_hash_style(level),
     )];
     spans.push(Span::raw(" "));
-    spans.extend(render_inline_markdown(
-        content,
+    spans.push(Span::styled(
+        content.to_string(),
         markdown_heading_text_style(level),
     ));
     Line::from(spans)
@@ -4902,16 +4950,58 @@ fn push_styled_text(spans: &mut Vec<Span<'static>>, buffer: &mut String, style: 
     }
 }
 
-fn find_closing_marker(chars: &[char], start: usize, marker: &[char]) -> Option<usize> {
+fn find_closing_marker(chars: &[char], start: usize, marker: &[char], require_right_flanking: bool) -> Option<usize> {
     let width = marker.len();
     let mut index = start;
     while index + width <= chars.len() {
-        if chars[index..index + width] == *marker {
+        if chars[index..index + width] == *marker
+            && (!require_right_flanking || is_right_flanking(chars, index, width))
+        {
             return Some(index);
         }
         index += 1;
     }
     None
+}
+
+/// Check if a delimiter run at `idx` is left-flanking per CommonMark §6.2.
+fn is_left_flanking(chars: &[char], idx: usize, run_len: usize) -> bool {
+    let after_idx = idx + run_len;
+    if after_idx >= chars.len() {
+        return false;
+    }
+    let after = chars[after_idx];
+    if after.is_whitespace() {
+        return false;
+    }
+    if !after.is_ascii_punctuation() {
+        return true;
+    }
+    if idx == 0 {
+        return true;
+    }
+    let before = chars[idx - 1];
+    before.is_whitespace() || before.is_ascii_punctuation()
+}
+
+/// Check if a delimiter run at `idx` is right-flanking per CommonMark §6.2.
+fn is_right_flanking(chars: &[char], idx: usize, run_len: usize) -> bool {
+    if idx == 0 {
+        return false;
+    }
+    let before = chars[idx - 1];
+    if before.is_whitespace() {
+        return false;
+    }
+    if !before.is_ascii_punctuation() {
+        return true;
+    }
+    let after_idx = idx + run_len;
+    if after_idx >= chars.len() {
+        return true;
+    }
+    let after = chars[after_idx];
+    after.is_whitespace() || after.is_ascii_punctuation()
 }
 
 fn inline_plain_text(spans: &[Span<'static>]) -> String {
