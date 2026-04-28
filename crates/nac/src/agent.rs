@@ -266,7 +266,7 @@ impl Agent {
                         thread_name: self.thread_name.clone(),
                         message: error.to_string(),
                     });
-                    self.tool_runtime.terminal_manager.remove_all();
+                    self.tool_runtime.terminal_manager.remove_all().await;
                     return Err(error);
                 }
             };
@@ -278,7 +278,7 @@ impl Agent {
                     thread_name: self.thread_name.clone(),
                     message: error.to_string(),
                 });
-                self.tool_runtime.terminal_manager.remove_all();
+                self.tool_runtime.terminal_manager.remove_all().await;
                 return Err(error);
             }
 
@@ -308,7 +308,7 @@ impl Agent {
                 self.emit(AgentEvent::RunFinished {
                     thread_name: self.thread_name.clone(),
                 });
-                self.tool_runtime.terminal_manager.remove_all();
+                self.tool_runtime.terminal_manager.remove_all().await;
                 return Ok(content);
             }
 

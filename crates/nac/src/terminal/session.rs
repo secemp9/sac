@@ -1,11 +1,12 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use tokio::sync::{mpsc, Notify};
 use vt100::Parser;
 
 use crate::sandbox::SandboxSession;
@@ -14,7 +15,8 @@ pub struct TerminalSession {
     pub name: String,
     parser: Parser,
     writer: Box<dyn Write + Send>,
-    output_rx: mpsc::Receiver<Vec<u8>>,
+    output_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    output_notify: Arc<Notify>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     _pty_pair: portable_pty::PtyPair,
     _reader_thread: std::thread::JoinHandle<()>,
@@ -103,7 +105,9 @@ impl TerminalSession {
         let parser = Parser::new(rows, cols, 0);
         let alive = Arc::new(AtomicBool::new(true));
         let alive_clone = alive.clone();
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let notify = Arc::new(Notify::new());
+        let notify_clone = notify.clone();
 
         let reader_thread = std::thread::spawn(move || {
             let mut reader = reader;
@@ -115,9 +119,8 @@ impl TerminalSession {
                         break;
                     }
                     Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
+                        let _ = tx.send(buf[..n].to_vec());
+                        notify_clone.notify_one();
                     }
                 }
             }
@@ -128,6 +131,7 @@ impl TerminalSession {
             parser,
             writer,
             output_rx: rx,
+            output_notify: notify,
             child,
             _pty_pair: pty_pair,
             _reader_thread: reader_thread,
@@ -159,6 +163,12 @@ impl TerminalSession {
             self.last_output_at = Instant::now();
         }
         Self::screen_to_text(&self.parser)
+    }
+
+    /// Returns a reference to the Notify that fires when the reader thread
+    /// pushes new output chunks into the channel.
+    pub fn output_notify(&self) -> &Arc<Notify> {
+        &self.output_notify
     }
 
     pub fn is_alive(&self) -> bool {

@@ -24,10 +24,7 @@ Use tty=true for:\n\
 - Long-running multi-step workflows where you need shell state to persist across calls \
 (cd into a directory, set env vars, then run commands)\n\
 - When you need more than one command in the same shell session\n\n\
-When tty=true, you get a session_name back. Use write_stdin to continue interacting with that session.\n\n\
-Python REPL note: if you use python interactively, multi-line definitions with \
-indentation will compound (auto-indent adds to pre-indented text). Use \
-exec('''...''') to run multi-line blocks instead."
+When tty=true, you get a session_name back. Use write_stdin to continue interacting with that session."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -44,7 +41,7 @@ exec('''...''') to run multi-line blocks instead."
     }
 }
 
-pub fn execute_exec_command(args: &Value, runtime: &ToolRuntime) -> Result<String> {
+pub async fn execute_exec_command(args: &Value, runtime: &ToolRuntime) -> Result<String> {
     let manager = &runtime.terminal_manager;
     let cmd = require_str(args, "cmd")?;
     let tty = args.get("tty").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -53,18 +50,18 @@ pub fn execute_exec_command(args: &Value, runtime: &ToolRuntime) -> Result<Strin
     let cwd = args.get("workdir").and_then(|v| v.as_str()).map(PathBuf::from);
 
     if !tty {
-        let output = manager.exec_one_shot(&cmd, cwd, 120, 40, yield_ms, max_output, runtime.sandbox.as_ref())?;
+        let output = manager.exec_one_shot(&cmd, cwd, 120, 40, yield_ms, max_output, runtime.sandbox.as_ref()).await?;
         return Ok(serde_json::to_string_pretty(&output)?);
     }
 
     let session_name = make_session_name();
-    let _info = manager.create(session_name.clone(), cwd, 120, 40, runtime.sandbox.as_ref())?;
+    let _info = manager.create(session_name.clone(), cwd, 120, 40, runtime.sandbox.as_ref()).await?;
 
     if cmd.trim().is_empty() {
-        let output = manager.write_stdin(&session_name, "", 200, max_output)?;
-        let alive = manager.get(&session_name).map(|i| i.alive).unwrap_or(false);
+        let output = manager.write_stdin(&session_name, "", 200, max_output).await?;
+        let alive = manager.get(&session_name).await.map(|i| i.alive).unwrap_or(false);
         if !alive {
-            let _ = manager.remove(&session_name);
+            let _ = manager.remove(&session_name).await;
             return Ok(serde_json::to_string_pretty(&serde_json::json!({
                 "output": output.output,
                 "exit_code": output.exit_code,
@@ -76,10 +73,10 @@ pub fn execute_exec_command(args: &Value, runtime: &ToolRuntime) -> Result<Strin
         return Ok(serde_json::to_string_pretty(&output)?);
     }
 
-    let output = manager.write_stdin(&session_name, &format!("{}\n", cmd), yield_ms, max_output)?;
-    let alive = manager.get(&session_name).map(|i| i.alive).unwrap_or(false);
+    let output = manager.write_stdin(&session_name, &format!("{}\n", cmd), yield_ms, max_output).await?;
+    let alive = manager.get(&session_name).await.map(|i| i.alive).unwrap_or(false);
     if !alive {
-        let _ = manager.remove(&session_name);
+        let _ = manager.remove(&session_name).await;
         return Ok(serde_json::to_string_pretty(&serde_json::json!({
             "output": output.output,
             "exit_code": output.exit_code,
@@ -103,9 +100,7 @@ pub fn write_stdin_definition() -> ToolDefinition {
             description: "Send input to a persistent terminal session created by exec_command with tty=true. \
 Also use this to poll for output by sending empty input.\n\n\
 Supports key notation: <RET> (Enter), <C-c> (Ctrl+C), <C-d> (Ctrl+D), <TAB>, <BSPC> (Backspace), \
-<UP>/<DOWN>/<LEFT>/<RIGHT>.\n\n\
-Note: in less, prefer j/k for scrolling. Arrow keys may not work in all programs.\n
-Python REPL: for multi-line blocks, use exec('''...''') to avoid indentation compounding."
+<UP>/<DOWN>/<LEFT>/<RIGHT>."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -121,24 +116,24 @@ Python REPL: for multi-line blocks, use exec('''...''') to avoid indentation com
     }
 }
 
-pub fn execute_write_stdin(args: &Value, runtime: &ToolRuntime) -> Result<String> {
+pub async fn execute_write_stdin(args: &Value, runtime: &ToolRuntime) -> Result<String> {
     let manager = &runtime.terminal_manager;
     let session_id = require_str(args, "session_id")?;
     let chars = args.get("chars").and_then(|v| v.as_str()).unwrap_or("");
     let yield_ms = clamp_yield(args.get("yield_time_ms").and_then(|v| v.as_u64()).unwrap_or(500));
     let max_output = args.get("max_output_chars").and_then(|v| v.as_u64()).unwrap_or(8000) as usize;
 
-    if manager.get(&session_id).is_none() {
+    if manager.get(&session_id).await.is_none() {
         return Err(anyhow!(
             "terminal session '{}' not found — it may have been closed or expired",
             session_id
         ));
     }
 
-    let output = manager.write_stdin(&session_id, chars, yield_ms, max_output)?;
-    let alive = manager.get(&session_id).map(|i| i.alive).unwrap_or(false);
+    let output = manager.write_stdin(&session_id, chars, yield_ms, max_output).await?;
+    let alive = manager.get(&session_id).await.map(|i| i.alive).unwrap_or(false);
     if !alive {
-        let _ = manager.remove(&session_id);
+        let _ = manager.remove(&session_id).await;
         return Ok(serde_json::to_string_pretty(&serde_json::json!({
             "output": output.output,
             "exit_code": output.exit_code,
@@ -204,27 +199,27 @@ mod tests {
     // exec_command
     // ------------------------------------------------------------------
 
-    #[test]
-    fn exec_command_definition_shape() {
+    #[tokio::test]
+    async fn exec_command_definition_shape() {
         let def = exec_command_definition();
         assert_eq!(def.function.name, "exec_command");
         assert!(def.function.description.contains("tty=true"));
         assert!(def.function.parameters.get("required").and_then(|v| v.as_array()).is_some());
     }
 
-    #[test]
-    fn exec_command_missing_cmd_fails() {
-        let result = execute_exec_command(&json!({}), &test_runtime());
+    #[tokio::test]
+    async fn exec_command_missing_cmd_fails() {
+        let result = execute_exec_command(&json!({}), &test_runtime()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing required argument"));
     }
 
-    #[test]
-    fn exec_command_one_shot_echo() {
+    #[tokio::test]
+    async fn exec_command_one_shot_echo() {
         let result = execute_exec_command(
             &json!({ "cmd": "echo hello-world", "tty": false, "yield_time_ms": 2000 }),
             &test_runtime(),
-        );
+        ).await;
         assert!(result.is_ok(), "error: {:?}", result.err());
         let output = result.unwrap();
         assert!(output.contains("hello-world"), "got: {}", output);
@@ -232,23 +227,23 @@ mod tests {
         assert!(parsed["session_name"].is_null());
     }
 
-    #[test]
-    fn exec_command_one_shot_multiline() {
+    #[tokio::test]
+    async fn exec_command_one_shot_multiline() {
         let result = execute_exec_command(
             &json!({ "cmd": "echo line1 && echo line2", "tty": false, "yield_time_ms": 2000 }),
             &test_runtime(),
-        );
+        ).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.contains("line1") && output.contains("line2"), "got: {}", output);
     }
 
-    #[test]
-    fn exec_command_persistent_creates_session() {
+    #[tokio::test]
+    async fn exec_command_persistent_creates_session() {
         let result = execute_exec_command(
             &json!({ "cmd": "echo persistent-test", "tty": true, "yield_time_ms": 2000 }),
             &test_runtime(),
-        );
+        ).await;
         assert!(result.is_ok(), "error: {:?}", result.err());
         let output = result.unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
@@ -257,12 +252,12 @@ mod tests {
         assert!(output.contains("persistent-test"), "got: {}", output);
     }
 
-    #[test]
-    fn exec_command_persistent_empty_cmd() {
+    #[tokio::test]
+    async fn exec_command_persistent_empty_cmd() {
         let result = execute_exec_command(
             &json!({ "cmd": "", "tty": true, "yield_time_ms": 2000 }),
             &test_runtime(),
-        );
+        ).await;
         assert!(result.is_ok(), "error: {:?}", result.err());
         let parsed: Value = serde_json::from_str(&result.unwrap()).unwrap();
         assert!(parsed["session_name"].is_string());
@@ -272,67 +267,67 @@ mod tests {
     // write_stdin
     // ------------------------------------------------------------------
 
-    #[test]
-    fn write_stdin_definition_shape() {
+    #[tokio::test]
+    async fn write_stdin_definition_shape() {
         let def = write_stdin_definition();
         assert_eq!(def.function.name, "write_stdin");
         let required = def.function.parameters.get("required").and_then(|v| v.as_array()).unwrap();
         assert!(required.iter().any(|v| v.as_str() == Some("session_id")));
     }
 
-    #[test]
-    fn write_stdin_missing_session_id_fails() {
-        assert!(execute_write_stdin(&json!({}), &test_runtime()).is_err());
+    #[tokio::test]
+    async fn write_stdin_missing_session_id_fails() {
+        assert!(execute_write_stdin(&json!({}), &test_runtime()).await.is_err());
     }
 
-    #[test]
-    fn write_stdin_session_not_found() {
+    #[tokio::test]
+    async fn write_stdin_session_not_found() {
         let result = execute_write_stdin(
             &json!({ "session_id": "nonexistent", "chars": "echo hi<RET>" }),
             &test_runtime(),
-        );
+        ).await;
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-    #[test]
-    fn write_stdin_poll_output() {
+    #[tokio::test]
+    async fn write_stdin_poll_output() {
         let runtime = test_runtime();
-        runtime.terminal_manager.create("test-poll".to_string(), None, 120, 40, None).unwrap();
-        runtime.terminal_manager.write_stdin("test-poll", "echo poll-me\n", 2000, 8000).unwrap();
+        runtime.terminal_manager.create("test-poll".to_string(), None, 120, 40, None).await.unwrap();
+        runtime.terminal_manager.write_stdin("test-poll", "echo poll-me\n", 2000, 8000).await.unwrap();
         let result = execute_write_stdin(
             &json!({ "session_id": "test-poll", "chars": "", "yield_time_ms": 500 }),
             &runtime,
-        );
+        ).await;
         assert!(result.is_ok(), "error: {:?}", result.err());
-        runtime.terminal_manager.remove("test-poll").ok();
+        runtime.terminal_manager.remove("test-poll").await.ok();
     }
 
-    #[test]
-    fn write_stdin_send_input() {
+    #[tokio::test]
+    async fn write_stdin_send_input() {
         let runtime = test_runtime();
-        runtime.terminal_manager.create("test-input".to_string(), None, 120, 40, None).unwrap();
+        runtime.terminal_manager.create("test-input".to_string(), None, 120, 40, None).await.unwrap();
         let result = execute_write_stdin(
             &json!({ "session_id": "test-input", "chars": "echo from-stdin<RET>", "yield_time_ms": 2000 }),
             &runtime,
-        );
+        ).await;
         assert!(result.is_ok(), "error: {:?}", result.err());
         assert!(result.unwrap().contains("from-stdin"));
-        runtime.terminal_manager.remove("test-input").ok();
+        runtime.terminal_manager.remove("test-input").await.ok();
     }
 
     // ------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------
 
-    #[test]
-    fn clamp_yield_edge() {
+    #[tokio::test]
+    async fn clamp_yield_edge() {
         assert_eq!(clamp_yield(0), 0);
         assert_eq!(clamp_yield(15_000), 15_000);
         assert_eq!(clamp_yield(60_000), 30_000);
     }
 
-    #[test]
-    fn make_session_name_increments() {
+    #[tokio::test]
+    async fn make_session_name_increments() {
         let a = make_session_name();
         let b = make_session_name();
         assert_ne!(a, b);

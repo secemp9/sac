@@ -188,13 +188,13 @@ pub async fn execute_tool(
         "edit" => edit::execute(args, runtime).await,
         "bash" => bash::execute(args, runtime).await,
         "exec_command" => {
-            match exec_command::execute_exec_command(&args, runtime) {
+            match exec_command::execute_exec_command(&args, runtime).await {
                 Ok(content) => ToolResult { content, is_error: false },
                 Err(e) => ToolResult { content: format!("Error: {:#}", e), is_error: true },
             }
         }
         "write_stdin" => {
-            match exec_command::execute_write_stdin(&args, runtime) {
+            match exec_command::execute_write_stdin(&args, runtime).await {
                 Ok(content) => ToolResult { content, is_error: false },
                 Err(e) => ToolResult { content: format!("Error: {:#}", e), is_error: true },
             }

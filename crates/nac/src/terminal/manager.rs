@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use tokio::sync::Mutex;
+use tokio::time::sleep;
 
 use crate::sandbox::SandboxSession;
 
@@ -25,7 +27,7 @@ impl TerminalManager {
         }
     }
 
-    pub fn create(
+    pub async fn create(
         &self,
         name: String,
         cwd: Option<PathBuf>,
@@ -33,7 +35,7 @@ impl TerminalManager {
         rows: u16,
         sandbox: Option<&SandboxSession>,
     ) -> Result<TerminalInfo> {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock().await;
         if let Some(mut old) = sessions.remove(&name) {
             let _ = old.kill();
         }
@@ -56,7 +58,7 @@ impl TerminalManager {
         Ok(info)
     }
 
-    pub fn write_stdin(
+    pub async fn write_stdin(
         &self,
         name: &str,
         input: &str,
@@ -66,7 +68,7 @@ impl TerminalManager {
         let start = Instant::now();
         let bytes = parse_keys(input);
         {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self.sessions.lock().await;
             let session = sessions
                 .get_mut(name)
                 .with_context(|| format!("terminal session '{}' not found", name))?;
@@ -77,9 +79,24 @@ impl TerminalManager {
             };
             session.write(&bytes)?;
         }
-        std::thread::sleep(Duration::from_millis(100));
-        let final_output = self.poll_until_stable(name, yield_ms, start);
-        let (output_text, truncated) = head_tail_truncate(&final_output, max_output);
+
+        // Small grace period for the process to react to input
+        sleep(Duration::from_millis(50)).await;
+
+        // Event-driven output collection
+        let output = self.collect_output(name, yield_ms, start).await?;
+
+        // Check alive, cleanup dead session
+        let alive = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(name).map_or(false, |s| s.is_alive())
+        };
+        if !alive {
+            let mut sessions = self.sessions.lock().await;
+            sessions.remove(name);
+        }
+
+        let (output_text, truncated) = head_tail_truncate(&output, max_output);
         Ok(TerminalOutput {
             output: output_text,
             exit_code: None,
@@ -89,7 +106,7 @@ impl TerminalManager {
         })
     }
 
-    pub fn exec_one_shot(
+    pub async fn exec_one_shot(
         &self,
         cmd: &str,
         cwd: Option<PathBuf>,
@@ -110,29 +127,12 @@ impl TerminalManager {
         let mut session = TerminalSession::spawn(temp_name, cwd, cols, rows, sandbox)?;
         let bytes = parse_keys(&format!("{}\n", cmd));
         session.write(&bytes)?;
-        std::thread::sleep(Duration::from_millis(100));
 
-        let mut last = String::new();
-        let mut stable = 0u32;
-        let deadline = start + Duration::from_millis(yield_ms);
-        loop {
-            std::thread::sleep(Duration::from_millis(100));
-            let current = session.read_screen();
-            if current == last {
-                stable += 1;
-                if stable >= 3 {
-                    break;
-                }
-            } else {
-                last = current;
-                stable = 0;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-        }
-        let final_output = session.read_screen();
-        let (output_text, truncated) = head_tail_truncate(&final_output, max_output);
+        sleep(Duration::from_millis(50)).await;
+
+        let output = Self::collect_output_direct(&mut session, yield_ms, start).await;
+
+        let (output_text, truncated) = head_tail_truncate(&output, max_output);
         let _ = session.kill();
         Ok(TerminalOutput {
             output: output_text,
@@ -143,31 +143,31 @@ impl TerminalManager {
         })
     }
 
-    pub fn remove(&self, name: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().unwrap();
+    pub async fn remove(&self, name: &str) -> Result<()> {
+        let mut sessions = self.sessions.lock().await;
         if let Some(mut session) = sessions.remove(name) {
             session.kill()?;
         }
         Ok(())
     }
 
-    pub fn remove_all(&self) {
-        let mut sessions = self.sessions.lock().unwrap();
+    pub async fn remove_all(&self) {
+        let mut sessions = self.sessions.lock().await;
         for (_, mut session) in sessions.drain() {
             let _ = session.kill();
         }
     }
 
-    pub fn list(&self) -> Vec<TerminalInfo> {
-        let sessions = self.sessions.lock().unwrap();
+    pub async fn list(&self) -> Vec<TerminalInfo> {
+        let sessions = self.sessions.lock().await;
         sessions
             .iter()
             .map(|(name, s)| self.session_info(name, s))
             .collect()
     }
 
-    pub fn get(&self, name: &str) -> Option<TerminalInfo> {
-        let sessions = self.sessions.lock().unwrap();
+    pub async fn get(&self, name: &str) -> Option<TerminalInfo> {
+        let sessions = self.sessions.lock().await;
         sessions.get(name).map(|s| self.session_info(&s.name, s))
     }
 
@@ -183,30 +183,98 @@ impl TerminalManager {
         }
     }
 
-    fn poll_until_stable(&self, name: &str, yield_ms: u64, start: Instant) -> String {
-        let mut last = String::new();
-        let mut stable = 0u32;
+    /// Event-driven output collection. Drains the screen on every Notify wake,
+    /// returns when the deadline fires or the buffer stays empty.
+    /// This replaces the old `poll_until_stable` stability-detector loop.
+    async fn collect_output(&self, name: &str, yield_ms: u64, start: Instant) -> Result<String> {
         let deadline = start + Duration::from_millis(yield_ms);
+        let mut last_screen = String::new();
+
+        // Clone the Notify handle outside the lock so we can await on it
+        let notify = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(name)
+                .ok_or_else(|| anyhow!("session vanished"))?
+                .output_notify()
+                .clone()
+        };
+
         loop {
-            std::thread::sleep(Duration::from_millis(100));
+            // Drain all available output brief lock
             let current = {
-                let mut sessions = self.sessions.lock().unwrap();
-                match sessions.get_mut(name) {
-                    Some(session) => session.read_screen(),
-                    None => return last,
-                }
+                let mut sessions = self.sessions.lock().await;
+                let session = sessions
+                    .get_mut(name)
+                    .ok_or_else(|| anyhow!("session vanished"))?;
+                session.read_screen()
             };
-            if current == last {
-                stable += 1;
-                if stable >= 3 {
-                    return current;
+
+            if current != last_screen {
+                last_screen = current;
+
+                // Check deadline after draining
+                if Instant::now() >= deadline {
+                    return Ok(last_screen);
                 }
-            } else {
-                last = current;
-                stable = 0;
+
+                // Got new output; yield to executor then immediately retry drain
+                tokio::task::yield_now().await;
+                continue;
             }
-            if Instant::now() >= deadline {
-                return last;
+
+            // Screen unchanged — wait for more output or deadline
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining == Duration::ZERO {
+                return Ok(last_screen);
+            }
+
+            tokio::select! {
+                _ = notify.notified() => {
+                    // More output arrived; loop will drain it
+                    continue;
+                }
+                _ = sleep(remaining) => {
+                    // Deadline reached with no new output
+                    return Ok(last_screen);
+                }
+            }
+        }
+    }
+
+    /// Variant of `collect_output` for one-shot sessions that aren't in the
+    /// sessions HashMap. Takes a direct `&mut TerminalSession` reference.
+    async fn collect_output_direct(
+        session: &mut TerminalSession,
+        yield_ms: u64,
+        start: Instant,
+    ) -> String {
+        let deadline = start + Duration::from_millis(yield_ms);
+        let mut last_screen = String::new();
+        let notify = session.output_notify().clone();
+
+        loop {
+            let current = session.read_screen();
+
+            if current != last_screen {
+                last_screen = current;
+
+                if Instant::now() >= deadline {
+                    return last_screen;
+                }
+
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining == Duration::ZERO {
+                return last_screen;
+            }
+
+            tokio::select! {
+                _ = notify.notified() => continue,
+                _ = sleep(remaining) => return last_screen,
             }
         }
     }
