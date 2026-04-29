@@ -2525,17 +2525,7 @@ impl App {
 
     fn render_worksets_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let width = inner_width(area);
-        let status_width = 9usize;
-        let count_width = 3usize;
-        let id_width = width.saturating_sub(status_width + count_width + 2).max(8);
-        let mut lines = vec![header_line(
-            &[
-                ("STATUS", status_width),
-                ("N", count_width),
-                ("ID", id_width),
-            ],
-            width,
-        )];
+        let mut lines = Vec::new();
 
         if let Some(error) = self.worksets.error.as_deref() {
             push_wrapped_prefixed_lines(
@@ -2552,43 +2542,34 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )));
         } else {
-            for workset in &self.worksets.items {
-                let item_count = workset.items.len();
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        pad_cell(&fit_text(&workset.status, status_width), status_width),
-                        workset_status_style(&workset.status),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        pad_cell(&item_count.to_string(), count_width),
-                        Style::default().fg(Color::Gray),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        fit_text(&workset.id, id_width),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
+            for (index, workset) in self.worksets.items.iter().enumerate() {
+                if index > 0 {
+                    lines.push(workset_separator_line(width));
+                }
+                lines.push(render_workset_header_line(workset, width));
                 if !workset.summary.is_empty() {
-                    push_wrapped_prefixed_lines(
+                    push_workset_labeled_lines(
                         &mut lines,
                         "  ",
+                        "GOAL",
                         &workset.summary,
                         width,
-                        Style::default().fg(Color::DarkGray),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                         Style::default().fg(Color::DarkGray),
                     );
                 }
                 if let Some(recipe) = workset.verification_recipe.as_deref() {
-                    push_wrapped_prefixed_lines(
+                    push_workset_labeled_lines(
                         &mut lines,
-                        "  verify ",
+                        "  ",
+                        "CHECK",
                         &one_line(recipe),
                         width,
-                        Style::default().fg(Color::DarkGray),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
                         Style::default().fg(Color::DarkGray),
                     );
                 }
@@ -2598,7 +2579,20 @@ impl App {
             }
         }
 
-        self.render_scrollable_lines_panel(frame, area, PanelId::Worksets, "WORKSETS", lines);
+        let title = panel_title_segments(vec![
+            Span::styled(
+                "WORKSETS".to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                self.worksets.items.len().to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        self.render_scrollable_lines_panel_with_title(frame, area, PanelId::Worksets, title, lines);
     }
 
     fn render_file_changes_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -3401,13 +3395,50 @@ fn render_file_change_line(file: &ChangedFileStat, width: usize) -> Line<'static
     ])
 }
 
+fn render_workset_header_line(workset: &store::WorksetRecord, width: usize) -> Line<'static> {
+    let marker = "▣ ";
+    let status_width = 10usize;
+    let unit_count = format!("{:02}", workset.items.len());
+    let fixed_width = marker.chars().count() + status_width + 1 + unit_count.chars().count() + 2;
+    let id_width = width.saturating_sub(fixed_width).max(1);
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            pad_cell(&workset.status.to_ascii_uppercase(), status_width),
+            workset_status_style(&workset.status),
+        ),
+        Span::raw(" "),
+        Span::styled(unit_count, Style::default().fg(Color::Magenta)),
+        Span::styled("u", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(
+            fit_text(&workset.id, id_width),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn workset_separator_line(width: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        "─".repeat(width.min(72)),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
 fn render_workset_item_lines(item: &store::WorksetItemRecord, width: usize) -> Vec<Line<'static>> {
-    let position_width = 3usize;
+    let position_label = if item.position < 100 {
+        format!("{:02}", item.position)
+    } else {
+        item.position.to_string()
+    };
+    let position_width = position_label.chars().count();
     let role_width = 12usize;
     let prefix_width = 2 + position_width + 1 + role_width + 1;
     let title_width = width.saturating_sub(prefix_width).max(1);
     let title_style = Style::default()
-        .fg(Color::Gray)
+        .fg(Color::White)
         .add_modifier(Modifier::BOLD);
     let title_parts = wrapped_text_segments(&item.title, title_width);
     let mut lines = Vec::with_capacity(title_parts.len().max(1));
@@ -3415,13 +3446,13 @@ fn render_workset_item_lines(item: &store::WorksetItemRecord, width: usize) -> V
         if index == 0 {
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    pad_cell(&item.position.to_string(), position_width),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(position_label.clone(), Style::default().fg(Color::DarkGray)),
                 Span::raw(" "),
                 Span::styled(
-                    pad_cell(&fit_text(&item.role, role_width), role_width),
+                    pad_cell(
+                        &fit_text(&item.role.to_ascii_uppercase(), role_width),
+                        role_width,
+                    ),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::raw(" "),
@@ -3439,9 +3470,10 @@ fn render_workset_item_lines(item: &store::WorksetItemRecord, width: usize) -> V
     }
 
     if !item.scope.is_empty() {
-        push_wrapped_prefixed_lines(
+        push_workset_labeled_lines(
             &mut lines,
-            "    @ ",
+            "      ",
+            "SCOPE",
             &item.scope,
             width,
             Style::default().fg(Color::DarkGray),
@@ -3450,20 +3482,22 @@ fn render_workset_item_lines(item: &store::WorksetItemRecord, width: usize) -> V
     }
 
     if !item.depends_on.is_empty() {
-        push_wrapped_prefixed_lines(
+        push_workset_labeled_lines(
             &mut lines,
-            "    > ",
+            "      ",
+            "DEPS",
             &item.depends_on.join(", "),
             width,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Yellow),
             Style::default().fg(Color::DarkGray),
         );
     }
 
     if !item.acceptance.is_empty() {
-        push_wrapped_prefixed_lines(
+        push_workset_labeled_lines(
             &mut lines,
-            "    ok ",
+            "      ",
+            "PASS",
             &item.acceptance,
             width,
             Style::default().fg(Color::Green),
@@ -3472,9 +3506,10 @@ fn render_workset_item_lines(item: &store::WorksetItemRecord, width: usize) -> V
     }
 
     if let Some(notes) = item.notes.as_deref().filter(|notes| !notes.is_empty()) {
-        push_wrapped_prefixed_lines(
+        push_workset_labeled_lines(
             &mut lines,
-            "    - ",
+            "      ",
+            "NOTE",
             notes,
             width,
             Style::default().fg(Color::DarkGray),
@@ -3483,6 +3518,25 @@ fn render_workset_item_lines(item: &store::WorksetItemRecord, width: usize) -> V
     }
 
     lines
+}
+
+fn push_workset_labeled_lines(
+    lines: &mut Vec<Line<'static>>,
+    indent: &str,
+    label: &str,
+    text: &str,
+    width: usize,
+    label_style: Style,
+    text_style: Style,
+) {
+    push_wrapped_prefixed_lines(
+        lines,
+        &format!("{}{:<6} ", indent, fit_text(label, 6)),
+        text,
+        width,
+        label_style,
+        text_style,
+    );
 }
 
 fn push_wrapped_prefixed_lines(
@@ -6051,7 +6105,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("implement"));
+        assert!(rendered.contains("IMPLEMENT"));
+        assert!(rendered.contains("SCOPE"));
+        assert!(rendered.contains("DEPS"));
+        assert!(rendered.contains("PASS"));
         assert!(rendered.contains("Inspect auth flow"));
         assert!(rendered.contains("Apply auth flow update"));
         assert!(rendered.contains("crates/nac/src/tui.rs"));
@@ -6082,7 +6139,8 @@ mod tests {
         assert!(rendered.len() > 6);
         assert!(joined.contains("update with long"));
         assert!(joined.contains("crates/nac/src/store.rs"));
-        assert!(joined.contains("targeted tests."));
+        assert!(joined.contains("targeted"));
+        assert!(joined.contains("tests."));
         assert!(!joined.contains('…'));
     }
 
