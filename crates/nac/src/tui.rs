@@ -45,6 +45,7 @@ const TIMELINE_LIMIT: usize = 220;
 const TOOL_HISTORY_LIMIT: usize = 20;
 const FILE_CHANGE_LIMIT: usize = 36;
 const WORKSPACE_REFRESH_INTERVAL: Duration = Duration::from_millis(400);
+const VIEW_CHANGE_SCROLL_SUPPRESS: Duration = Duration::from_millis(750);
 const PROMPT_SEPARATOR: &str = " › ";
 const COMMAND_SEPARATOR: &str = " / ";
 const CONTINUATION_PREFIX: &str = "   ";
@@ -462,6 +463,7 @@ struct App {
     workspace_refresh_deadline: Option<Instant>,
     panel_scrolls: HashMap<PanelId, usize>,
     panel_views: HashMap<PanelId, PanelView>,
+    suppress_mouse_scroll_until: Option<Instant>,
     selection: Option<SelectionState>,
     help_visible: bool,
     screen: ScreenMode,
@@ -523,6 +525,7 @@ impl App {
             workspace_refresh_deadline: None,
             panel_scrolls,
             panel_views: HashMap::new(),
+            suppress_mouse_scroll_until: None,
             selection: None,
             help_visible: false,
             screen: ScreenMode::Dashboard,
@@ -594,7 +597,25 @@ impl App {
         AppAction::None
     }
 
+    fn scroll_reset_state(&self) -> (ScreenMode, bool, Option<String>, usize) {
+        (
+            self.screen,
+            self.help_visible,
+            self.selected_thread.clone(),
+            self.session_picker.selected,
+        )
+    }
+
     fn handle_key_event(&mut self, key: KeyEvent) -> AppAction {
+        let before = self.scroll_reset_state();
+        let action = self.handle_key_event_inner(key);
+        if self.scroll_reset_state() != before {
+            self.request_scroll_event_reset();
+        }
+        action
+    }
+
+    fn handle_key_event_inner(&mut self, key: KeyEvent) -> AppAction {
         if key.kind == KeyEventKind::Release {
             return AppAction::None;
         }
@@ -827,13 +848,17 @@ impl App {
                 self.copy_selection_to_clipboard();
             }
             MouseEventKind::ScrollUp => {
-                if let Some(panel) = self.panel_at(mouse.column, mouse.row) {
-                    self.scroll_panel(panel, -3);
+                if !self.suppressing_mouse_scroll() {
+                    if let Some(panel) = self.panel_at(mouse.column, mouse.row) {
+                        self.scroll_panel(panel, -3);
+                    }
                 }
             }
             MouseEventKind::ScrollDown => {
-                if let Some(panel) = self.panel_at(mouse.column, mouse.row) {
-                    self.scroll_panel(panel, 3);
+                if !self.suppressing_mouse_scroll() {
+                    if let Some(panel) = self.panel_at(mouse.column, mouse.row) {
+                        self.scroll_panel(panel, 3);
+                    }
                 }
             }
             _ => {}
@@ -982,6 +1007,23 @@ impl App {
             ScreenMode::Focused(FocusPanel::Threads) => PanelId::ThreadEpisodes,
             _ => PanelId::Response,
         }
+    }
+
+    fn request_scroll_event_reset(&mut self) {
+        self.suppress_mouse_scroll_until = Some(Instant::now() + VIEW_CHANGE_SCROLL_SUPPRESS);
+    }
+
+    fn suppressing_mouse_scroll(&mut self) -> bool {
+        let Some(until) = self.suppress_mouse_scroll_until else {
+            return false;
+        };
+
+        if Instant::now() < until {
+            return true;
+        }
+
+        self.suppress_mouse_scroll_until = None;
+        false
     }
 
     fn refresh_session_picker(&mut self) {
@@ -3014,6 +3056,30 @@ enum AppAction {
     ResumeSession(String),
 }
 
+fn next_queued_input_event(
+    input_rx: &mut mpsc::UnboundedReceiver<CrosstermEvent>,
+    drop_scroll_events: bool,
+) -> Option<CrosstermEvent> {
+    while let Ok(event) = input_rx.try_recv() {
+        if drop_scroll_events
+            && matches!(
+                event,
+                CrosstermEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight,
+                    ..
+                })
+            )
+        {
+            continue;
+        }
+        return Some(event);
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SlashCommand {
     Exit,
@@ -3097,8 +3163,12 @@ pub async fn run(
                                     AppAction::Quit | AppAction::None => {}
                                 }
                             }
+                            let mut drop_queued_scroll_events = app.suppressing_mouse_scroll();
                             if !terminal_action {
-                                while let Ok(next_event) = input_rx.try_recv() {
+                                while let Some(next_event) = next_queued_input_event(
+                                    &mut input_rx,
+                                    drop_queued_scroll_events,
+                                ) {
                                     if let Some(action) = app.handle_crossterm_event(next_event) {
                                         match action {
                                             AppAction::Submit(prompt) => {
@@ -3116,6 +3186,9 @@ pub async fn run(
                                             }
                                             AppAction::None => {}
                                         }
+                                    }
+                                    if app.suppressing_mouse_scroll() {
+                                        drop_queued_scroll_events = true;
                                     }
                                 }
                             }
@@ -5619,6 +5692,27 @@ mod tests {
         }
     }
 
+    fn test_thread_view(name: &str, updated_at_ts: u64) -> ThreadView {
+        ThreadView {
+            name: name.to_string(),
+            action: format!("inspect {name}"),
+            state: ThreadState::Idle,
+            updated_at: format!("00:00:{updated_at_ts:02}"),
+            updated_at_ts,
+            episodes: 1,
+            summary: String::new(),
+        }
+    }
+
+    fn test_scroll_event(kind: MouseEventKind) -> CrosstermEvent {
+        CrosstermEvent::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
     #[test]
     fn shift_enter_inserts_newline() {
         let dir = temp_dir("newline");
@@ -6111,6 +6205,51 @@ mod tests {
         assert_eq!(thread.state, ThreadState::Idle);
         assert_eq!(thread.summary, "exit 0");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn thread_navigation_requests_scroll_reset() {
+        let dir = temp_dir("thread-scroll-suppress");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.screen = ScreenMode::Focused(FocusPanel::Threads);
+        app.threads
+            .insert("first".to_string(), test_thread_view("first", 2));
+        app.threads
+            .insert("second".to_string(), test_thread_view("second", 1));
+        app.selected_thread = Some("first".to_string());
+        app.panel_scrolls.insert(PanelId::ThreadEpisodes, 20);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.selected_thread.as_deref(), Some("second"));
+        assert_eq!(app.panel_scrolls.get(&PanelId::ThreadEpisodes), Some(&0));
+        assert!(app.suppressing_mouse_scroll());
+        app.suppress_mouse_scroll_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(!app.suppressing_mouse_scroll());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn queued_scroll_filter_drops_only_pending_scroll_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for kind in [MouseEventKind::ScrollDown, MouseEventKind::ScrollRight] {
+            tx.send(test_scroll_event(kind)).unwrap();
+        }
+        tx.send(CrosstermEvent::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        drop(tx);
+
+        assert!(matches!(
+            next_queued_input_event(&mut rx, true),
+            Some(CrosstermEvent::Key(KeyEvent {
+                code: KeyCode::Char('x'),
+                ..
+            }))
+        ));
+        assert!(next_queued_input_event(&mut rx, true).is_none());
     }
 
     #[test]
