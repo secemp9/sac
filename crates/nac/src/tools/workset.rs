@@ -8,39 +8,71 @@ pub fn define_definition() -> ToolDefinition {
     use serde_json::json;
     def(
         "workset_define",
-        "Create or replace a durable coordination workset for this session. Use worksets for multi-step batch, plan, or review efforts, not trivial one-off tasks.",
+        "Create or replace a durable high-level plan workset for this session.",
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string", "description": "Stable workset id." },
-                "kind": { "type": "string", "description": "Workset kind such as batch, plan, or review." },
-                "instruction": { "type": "string", "description": "Original top-level instruction for the workset." },
-                "status": { "type": "string", "description": "Overall workset status." },
-                "summary": { "type": "string", "description": "Compact summary of the current plan or state." },
-                "verification_recipe": { "type": "string", "description": "Optional end-to-end or verification recipe." },
+                "id": {
+                    "type": "string",
+                    "description": "Short stable handle for this workset. This is what the user passes to /run <workset>, so prefer lowercase words separated by hyphens."
+                },
+                "goal": {
+                    "type": "string",
+                    "description": "Durable user-facing objective for the whole plan. Capture what should be true when the workset is complete, not the orchestrator's current focus."
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Whole-plan state, such as planned, running, blocked, completed, or abandoned."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Compact synopsis of the plan and its current state. Keep it short enough to scan in the worksets pane."
+                },
+                "verification_recipe": {
+                    "type": "string",
+                    "description": "Optional end-to-end validation recipe for the workset, such as tests or manual checks that prove the goal was met."
+                },
                 "items": {
                     "type": "array",
-                    "description": "Ordered work items in this workset.",
+                    "description": "Ordered high-level plan items. Order should reflect dependencies and the natural execution sequence.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "title": { "type": "string" },
-                            "thread_name": { "type": "string" },
-                            "scope": { "type": "string" },
-                            "description": { "type": "string" },
-                            "item_kind": { "type": "string" },
-                            "status": { "type": "string" },
-                            "source_threads": {
+                            "title": {
+                                "type": "string",
+                                "description": "Concise label for this item. Make it stable enough to reference from depends_on."
+                            },
+                            "scope": {
+                                "type": "string",
+                                "description": "Owned files, modules, product area, or system boundary for this item. Use this to prevent overlapping implementation ownership."
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Concrete work to do for this item, including important constraints or context."
+                            },
+                            "role": {
+                                "type": "string",
+                                "description": "Intended mode for the item, such as research, implementation, verification, cleanup, or coordination."
+                            },
+                            "depends_on": {
                                 "type": "array",
+                                "description": "Prerequisite workset item titles or ids that should be satisfied before this item starts. Use an empty array when there are none.",
                                 "items": { "type": "string" }
                             },
-                            "last_summary": { "type": "string" }
+                            "acceptance": {
+                                "type": "string",
+                                "description": "Concrete condition that makes this item complete. Prefer observable outcomes over vague intent."
+                            },
+                            "notes": {
+                                "type": "string",
+                                "description": "Optional durable context, risks, discoveries, or execution notes for this item."
+                            }
                         },
-                        "required": ["title", "thread_name", "scope", "description", "item_kind", "status"]
+                        "required": ["title", "scope", "description", "role", "depends_on", "acceptance"]
                     }
                 }
             },
-            "required": ["id", "kind", "instruction", "status", "summary", "items"]
+            "required": ["id", "goal", "status", "summary", "items"]
         }),
     )
 }
@@ -67,9 +99,7 @@ pub fn list_definition() -> ToolDefinition {
         "List persisted worksets in the current session.",
         json!({
             "type": "object",
-            "properties": {
-                "kind": { "type": "string", "description": "Optional kind filter such as batch, plan, or review." }
-            }
+            "properties": {}
         }),
     )
 }
@@ -83,12 +113,8 @@ pub async fn execute_define(args: Value, runtime: &ToolRuntime) -> ToolResult {
         Ok(id) => id,
         Err(error) => return error,
     };
-    let kind = match require_str(&args, "kind") {
-        Ok(kind) => kind,
-        Err(error) => return error,
-    };
-    let instruction = match require_str(&args, "instruction") {
-        Ok(instruction) => instruction,
+    let goal = match require_str(&args, "goal") {
+        Ok(goal) => goal,
         Err(error) => return error,
     };
     let status = match require_str(&args, "status") {
@@ -110,8 +136,7 @@ pub async fn execute_define(args: Value, runtime: &ToolRuntime) -> ToolResult {
 
     let definition = WorksetDefinition {
         id: id.clone(),
-        kind,
-        instruction,
+        goal,
         status,
         summary,
         verification_recipe,
@@ -121,10 +146,8 @@ pub async fn execute_define(args: Value, runtime: &ToolRuntime) -> ToolResult {
     let store_path = runtime.store_path.clone();
     let sid = session_id.clone();
     let items_len = definition.items.len();
-    match tokio::task::spawn_blocking(move || {
-        store::define_workset(&store_path, &sid, &definition)
-    })
-    .await
+    match tokio::task::spawn_blocking(move || store::define_workset(&store_path, &sid, &definition))
+        .await
     {
         Ok(Ok(())) => ToolResult {
             content: format!("Saved workset '{}' with {} item(s).", id, items_len),
@@ -154,11 +177,7 @@ pub async fn execute_read(args: Value, runtime: &ToolRuntime) -> ToolResult {
     let store_path = runtime.store_path.clone();
     let sid = session_id.clone();
     let wid = id.clone();
-    match tokio::task::spawn_blocking(move || {
-        store::read_workset(&store_path, &sid, &wid)
-    })
-    .await
-    {
+    match tokio::task::spawn_blocking(move || store::read_workset(&store_path, &sid, &wid)).await {
         Ok(Ok(Some(workset))) => ToolResult {
             content: store::render_workset_document(&workset),
             is_error: false,
@@ -178,24 +197,15 @@ pub async fn execute_read(args: Value, runtime: &ToolRuntime) -> ToolResult {
     }
 }
 
-pub async fn execute_list(args: Value, runtime: &ToolRuntime) -> ToolResult {
+pub async fn execute_list(_args: Value, runtime: &ToolRuntime) -> ToolResult {
     let session_id = match require_session(runtime) {
         Ok(session_id) => session_id.to_string(),
-        Err(error) => return error,
-    };
-    let kind = match optional_string(&args, "kind") {
-        Ok(kind) => kind,
         Err(error) => return error,
     };
 
     let store_path = runtime.store_path.clone();
     let sid = session_id.clone();
-    let filter_kind = kind.clone();
-    match tokio::task::spawn_blocking(move || {
-        store::list_worksets(&store_path, &sid, filter_kind.as_deref())
-    })
-    .await
-    {
+    match tokio::task::spawn_blocking(move || store::list_worksets(&store_path, &sid)).await {
         Ok(Ok(worksets)) => ToolResult {
             content: store::render_workset_list(&worksets),
             is_error: false,
@@ -242,7 +252,10 @@ fn optional_string(args: &Value, key: &str) -> Result<Option<String>, ToolResult
 
 fn parse_items(value: Option<&Value>) -> Result<Vec<WorksetItemDefinition>, ToolResult> {
     let Some(value) = value else {
-        return Ok(Vec::new());
+        return Err(ToolResult {
+            content: "Error: 'items' is required".to_string(),
+            is_error: true,
+        });
     };
     let Some(items) = value.as_array() else {
         return Err(ToolResult {
@@ -257,10 +270,6 @@ fn parse_items(value: Option<&Value>) -> Result<Vec<WorksetItemDefinition>, Tool
             Ok(value) => value,
             Err(error) => return Err(error),
         };
-        let thread_name = match require_item_str(item, "thread_name") {
-            Ok(value) => value,
-            Err(error) => return Err(error),
-        };
         let scope = match require_item_str(item, "scope") {
             Ok(value) => value,
             Err(error) => return Err(error),
@@ -269,31 +278,30 @@ fn parse_items(value: Option<&Value>) -> Result<Vec<WorksetItemDefinition>, Tool
             Ok(value) => value,
             Err(error) => return Err(error),
         };
-        let item_kind = match require_item_str(item, "item_kind") {
+        let role = match require_item_str(item, "role") {
             Ok(value) => value,
             Err(error) => return Err(error),
         };
-        let status = match require_item_str(item, "status") {
+        let depends_on = match require_string_array(item, "depends_on") {
             Ok(value) => value,
             Err(error) => return Err(error),
         };
-        let source_threads = match optional_string_array(item, "source_threads") {
+        let acceptance = match require_item_str(item, "acceptance") {
             Ok(value) => value,
             Err(error) => return Err(error),
         };
-        let last_summary = match optional_string(item, "last_summary") {
+        let notes = match optional_string(item, "notes") {
             Ok(value) => value,
             Err(error) => return Err(error),
         };
         parsed.push(WorksetItemDefinition {
             title,
-            thread_name,
             scope,
             description,
-            item_kind,
-            status,
-            source_threads,
-            last_summary,
+            role,
+            depends_on,
+            acceptance,
+            notes,
         });
     }
 
@@ -311,9 +319,12 @@ fn require_item_str(value: &Value, key: &str) -> Result<String, ToolResult> {
         })
 }
 
-fn optional_string_array(value: &Value, key: &str) -> Result<Vec<String>, ToolResult> {
+fn require_string_array(value: &Value, key: &str) -> Result<Vec<String>, ToolResult> {
     let Some(value) = value.get(key) else {
-        return Ok(Vec::new());
+        return Err(ToolResult {
+            content: format!("Error: '{}' is required", key),
+            is_error: true,
+        });
     };
     let Some(items) = value.as_array() else {
         return Err(ToolResult {

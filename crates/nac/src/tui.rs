@@ -251,7 +251,7 @@ fn load_workset_records(
     session_id: &str,
 ) -> anyhow::Result<Vec<store::WorksetRecord>> {
     tokio::task::block_in_place(|| {
-        let summaries = store::list_worksets(store_path, session_id, None)?;
+        let summaries = store::list_worksets(store_path, session_id)?;
         let mut worksets = Vec::with_capacity(summaries.len());
         for summary in summaries {
             if let Some(workset) = store::read_workset(store_path, session_id, &summary.id)? {
@@ -784,12 +784,7 @@ impl App {
                             self.clear_composer();
                             return AppAction::None;
                         }
-                        Ok(
-                            SlashCommand::Batch { .. }
-                            | SlashCommand::BatchRun { .. }
-                            | SlashCommand::Plan { .. }
-                            | SlashCommand::Review { .. },
-                        ) => {}
+                        Ok(SlashCommand::Plan { .. } | SlashCommand::Run { .. }) => {}
                         Err(message) => {
                             self.show_composer_notice(message, Tone::Warning);
                             return AppAction::None;
@@ -2054,15 +2049,12 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "/batch /batch-run /plan /review",
+                    "/plan /run",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    " create durable worksets",
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(" plan or run a workset", Style::default().fg(Color::White)),
             ]),
             Line::from(""),
             Line::from(Span::styled(
@@ -2533,15 +2525,11 @@ impl App {
 
     fn render_worksets_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let width = inner_width(area);
-        let kind_width = 6usize;
         let status_width = 9usize;
         let count_width = 3usize;
-        let id_width = width
-            .saturating_sub(kind_width + status_width + count_width + 3)
-            .max(8);
+        let id_width = width.saturating_sub(status_width + count_width + 2).max(8);
         let mut lines = vec![header_line(
             &[
-                ("KIND", kind_width),
                 ("STATUS", status_width),
                 ("N", count_width),
                 ("ID", id_width),
@@ -2550,10 +2538,14 @@ impl App {
         )];
 
         if let Some(error) = self.worksets.error.as_deref() {
-            lines.push(Line::from(Span::styled(
-                fit_text(error, width),
+            push_wrapped_prefixed_lines(
+                &mut lines,
+                "",
+                error,
+                width,
                 Style::default().fg(Color::DarkGray),
-            )));
+                Style::default().fg(Color::DarkGray),
+            );
         } else if self.worksets.items.is_empty() {
             lines.push(Line::from(Span::styled(
                 "No worksets yet.",
@@ -2563,11 +2555,6 @@ impl App {
             for workset in &self.worksets.items {
                 let item_count = workset.items.len();
                 lines.push(Line::from(vec![
-                    Span::styled(
-                        pad_cell(&fit_text(&workset.kind, kind_width), kind_width),
-                        workset_kind_style(&workset.kind),
-                    ),
-                    Span::raw(" "),
                     Span::styled(
                         pad_cell(&fit_text(&workset.status, status_width), status_width),
                         workset_status_style(&workset.status),
@@ -2586,16 +2573,24 @@ impl App {
                     ),
                 ]));
                 if !workset.summary.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        fit_text(&format!("  {}", workset.summary), width),
+                    push_wrapped_prefixed_lines(
+                        &mut lines,
+                        "  ",
+                        &workset.summary,
+                        width,
                         Style::default().fg(Color::DarkGray),
-                    )));
+                        Style::default().fg(Color::DarkGray),
+                    );
                 }
                 if let Some(recipe) = workset.verification_recipe.as_deref() {
-                    lines.push(Line::from(Span::styled(
-                        fit_text(&format!("  verify {}", one_line(recipe)), width),
+                    push_wrapped_prefixed_lines(
+                        &mut lines,
+                        "  verify ",
+                        &one_line(recipe),
+                        width,
                         Style::default().fg(Color::DarkGray),
-                    )));
+                        Style::default().fg(Color::DarkGray),
+                    );
                 }
                 for item in &workset.items {
                     lines.extend(render_workset_item_lines(item, width));
@@ -3066,10 +3061,8 @@ fn next_queued_input_event(
 enum SlashCommand {
     Exit,
     Sessions,
-    Batch { instruction: String },
-    BatchRun { instruction: String },
     Plan { instruction: String },
-    Review { instruction: String },
+    Run { workset_id: String },
 }
 
 pub enum TuiOutcome {
@@ -3409,50 +3402,128 @@ fn render_file_change_line(file: &ChangedFileStat, width: usize) -> Line<'static
 }
 
 fn render_workset_item_lines(item: &store::WorksetItemRecord, width: usize) -> Vec<Line<'static>> {
-    let status_width = 9usize;
-    let kind_width = 9usize;
-    let thread_width = width.saturating_sub(status_width + kind_width + 10).max(10);
-    let title_width = width.saturating_sub(2);
-    let scope_width = width.saturating_sub(8);
-    let mut lines = vec![Line::from(vec![
-        Span::styled("  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            pad_cell(&fit_text(&item.status, status_width), status_width),
-            workset_status_style(&item.status),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            pad_cell(&fit_text(&item.item_kind, kind_width), kind_width),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            fit_text(&item.thread_name, thread_width),
-            Style::default().fg(Color::White),
-        ),
-    ])];
-
-    lines.push(Line::from(vec![
-        Span::styled("    ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            fit_text(&item.title, title_width),
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    let position_width = 3usize;
+    let role_width = 12usize;
+    let prefix_width = 2 + position_width + 1 + role_width + 1;
+    let title_width = width.saturating_sub(prefix_width).max(1);
+    let title_style = Style::default()
+        .fg(Color::Gray)
+        .add_modifier(Modifier::BOLD);
+    let title_parts = wrapped_text_segments(&item.title, title_width);
+    let mut lines = Vec::with_capacity(title_parts.len().max(1));
+    for (index, part) in title_parts.into_iter().enumerate() {
+        if index == 0 {
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    pad_cell(&item.position.to_string(), position_width),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    pad_cell(&fit_text(&item.role, role_width), role_width),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(" "),
+                Span::styled(part, title_style),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    " ".repeat(prefix_width),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(part, title_style),
+            ]));
+        }
+    }
 
     if !item.scope.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("    @ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                fit_text(&item.scope, scope_width),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
+        push_wrapped_prefixed_lines(
+            &mut lines,
+            "    @ ",
+            &item.scope,
+            width,
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::DarkGray),
+        );
+    }
+
+    if !item.depends_on.is_empty() {
+        push_wrapped_prefixed_lines(
+            &mut lines,
+            "    > ",
+            &item.depends_on.join(", "),
+            width,
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::DarkGray),
+        );
+    }
+
+    if !item.acceptance.is_empty() {
+        push_wrapped_prefixed_lines(
+            &mut lines,
+            "    ok ",
+            &item.acceptance,
+            width,
+            Style::default().fg(Color::Green),
+            Style::default().fg(Color::DarkGray),
+        );
+    }
+
+    if let Some(notes) = item.notes.as_deref().filter(|notes| !notes.is_empty()) {
+        push_wrapped_prefixed_lines(
+            &mut lines,
+            "    - ",
+            notes,
+            width,
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::DarkGray),
+        );
     }
 
     lines
+}
+
+fn push_wrapped_prefixed_lines(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &str,
+    text: &str,
+    width: usize,
+    prefix_style: Style,
+    text_style: Style,
+) {
+    let prefix_width = prefix.chars().count();
+    let text_width = width.saturating_sub(prefix_width);
+    if text_width == 0 {
+        lines.push(Line::from(Span::styled(
+            fit_text(prefix, width),
+            prefix_style,
+        )));
+        return;
+    }
+
+    for (index, part) in wrapped_text_segments(text, text_width)
+        .into_iter()
+        .enumerate()
+    {
+        let line_prefix = if index == 0 {
+            prefix.to_string()
+        } else {
+            " ".repeat(prefix_width)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(line_prefix, prefix_style),
+            Span::styled(part, text_style),
+        ]));
+    }
+}
+
+fn wrapped_text_segments(text: &str, width: usize) -> Vec<String> {
+    wrap_soft_line(&one_line(text), width)
+        .into_iter()
+        .map(|part| part.trim_end().to_string())
+        .collect()
 }
 
 fn panel_block(title: &str) -> Block<'static> {
@@ -4255,24 +4326,17 @@ fn parse_slash_command(prompt: &str) -> Option<Result<SlashCommand, String>> {
     Some(match name {
         "exit" if args.is_empty() => Ok(SlashCommand::Exit),
         "sessions" if args.is_empty() => Ok(SlashCommand::Sessions),
-        "batch" => parse_workset_slash_command("batch", args, |instruction| SlashCommand::Batch {
-            instruction,
+        "plan" => parse_workset_slash_command("plan", "instruction", args, |instruction| {
+            SlashCommand::Plan { instruction }
         }),
-        "batch-run" => parse_workset_slash_command("batch-run", args, |instruction| {
-            SlashCommand::BatchRun { instruction }
-        }),
-        "plan" => parse_workset_slash_command("plan", args, |instruction| SlashCommand::Plan {
-            instruction,
-        }),
-        "review" => parse_workset_slash_command("review", args, |instruction| {
-            SlashCommand::Review { instruction }
-        }),
+        "run" => parse_run_slash_command(args),
         _ => Err(format!("unknown slash command: /{}", name)),
     })
 }
 
 fn parse_workset_slash_command<F>(
     name: &str,
+    arg_name: &str,
     args: &str,
     constructor: F,
 ) -> Result<SlashCommand, String>
@@ -4280,79 +4344,60 @@ where
     F: FnOnce(String) -> SlashCommand,
 {
     if args.is_empty() {
-        Err(format!("usage: /{} <instruction>", name))
+        Err(format!("usage: /{} <{}>", name, arg_name))
     } else {
         Ok(constructor(args.to_string()))
     }
 }
 
+fn parse_run_slash_command(args: &str) -> Result<SlashCommand, String> {
+    if args.is_empty() || args.split_whitespace().count() != 1 {
+        Err("usage: /run <workset>".to_string())
+    } else {
+        Ok(SlashCommand::Run {
+            workset_id: args.to_string(),
+        })
+    }
+}
+
 fn expand_user_prompt(prompt: &str) -> String {
     match parse_slash_command(prompt) {
-        Some(Ok(SlashCommand::Batch { instruction })) => {
-            build_workset_command_prompt("batch", &instruction)
-        }
-        Some(Ok(SlashCommand::BatchRun { instruction })) => {
-            build_workset_command_prompt_with_mode("batch-run", "batch", &instruction, true)
-        }
-        Some(Ok(SlashCommand::Plan { instruction })) => {
-            build_workset_command_prompt("plan", &instruction)
-        }
-        Some(Ok(SlashCommand::Review { instruction })) => {
-            build_workset_command_prompt("review", &instruction)
-        }
+        Some(Ok(SlashCommand::Plan { instruction })) => build_plan_command_prompt(&instruction),
+        Some(Ok(SlashCommand::Run { workset_id })) => build_run_command_prompt(&workset_id),
         _ => prompt.to_string(),
     }
 }
 
-fn build_workset_command_prompt(kind: &str, instruction: &str) -> String {
-    build_workset_command_prompt_with_mode(kind, kind, instruction, false)
-}
-
-fn build_workset_command_prompt_with_mode(
-    command: &str,
-    workset_kind: &str,
-    instruction: &str,
-    auto_execute: bool,
-) -> String {
-    let guidance = match command {
-        "batch" => "Break the work into independently executable units suitable for later parallel thread execution. Favor per-directory or per-module slices over arbitrary file lists, and keep scopes non-overlapping where practical.",
-        "batch-run" => "Break the work into independently executable units suitable for immediate parallel thread execution. Favor per-directory or per-module slices over arbitrary file lists, and keep scopes non-overlapping where practical.",
-        "plan" => "Optimize for a durable execution plan that can survive session boundaries. Sequence items clearly, note dependencies, and only introduce parallel tracks when they materially improve progress.",
-        "review" => "Optimize for code review. Break the requested change into smaller, manageably scoped, human-reviewable items with minimal surface area, explicit risk areas, and concrete verification for each item.",
-        _ => "Create a concise, durable structured plan.",
-    };
-    let execution_guidance = if auto_execute {
-        "- Do planning and research as needed.\n\
-         - Persist the workset with `workset_define` before dispatching mutating implementation threads.\n\
-         - Then execute the workset: dispatch the implementation and verification threads that are ready to run.\n\
-         - Each worker action must include its owned scope and a warning that it is not alone in the codebase and must not overwrite unrelated edits.\n\
-         - You may dispatch independent items in parallel when their scopes are non-overlapping.\n\
-         - End by summarizing what was launched, what completed, and the current workset status.\n"
-    } else {
-        "- Do planning and research only.\n\
-         - You may dispatch research, setup, or verification threads if needed to understand the codebase.\n\
-         - Do not dispatch mutating implementation threads yet.\n\
-         - End by presenting the structured plan in normal prose, explicitly including the chosen workset id and the next sensible approval or execution step.\n"
-    };
-
+fn build_plan_command_prompt(instruction: &str) -> String {
     format!(
-        "# Workset Command: /{command}\n\n\
-         The user explicitly invoked the `/{command}` slash command. Treat this as a request to create exactly one durable workset using the `workset_define` tool.\n\n\
+        "# /plan: Workset Planning\n\n\
          User instruction:\n\
          {instruction}\n\n\
-         Requirements:\n\
-         - Research the codebase as needed, using threads for bounded research or setup work when that will materially improve the plan.\n\
-         - Create exactly one workset with `kind: \"{workset_kind}\"`.\n\
-         - Choose a short stable workset id and mention it clearly in your final response.\n\
-         - Persist the workset with `workset_define`, including a concise summary, a verification recipe when you can determine one, and ordered items.\n\
-         - Every workset item must include: `title`, `thread_name`, `scope`, `description`, `item_kind`, `status`, `source_threads`, and optional `last_summary`.\n\
-         - Prefer stable thread names that communicate role and ownership.\n\
-         - Worker threads are not alone in the codebase. Scopes should be explicit, non-overlapping where practical, and written so later execution can warn workers not to trample unrelated edits.\n\
-         - Do not create a workset for trivial one-off work unless the user explicitly asked for one. Here, the user did explicitly ask.\n\n\
-         Guidance for this command:\n\
-         {guidance}\n\n\
-         At this stage:\n\
-         {execution_guidance}"
+         Create exactly one durable high-level workset with `workset_define`.\n\n\
+         Steps:\n\
+         1. Research the affected files, patterns, and conventions. Use general research `thread` calls at first, followed by bounded focused `thread` calls for additional detailed research when helpful.\n\
+         2. Decompose the work into self-contained units. Prefer per-module or per-directory slices, keep scopes explicit, and record dependencies only when a unit really needs another first.\n\
+         3. Define the verification recipe. Include the exact test command, manual flow, or reason that unit tests are sufficient.\n\
+         4. Save the workset. Use `id` as the short handle for `/run <workset>`; `goal`, `status`, and `summary` for the overall plan; and ordered `items` with `title`, `scope`, `description`, `role`, `depends_on`, `acceptance`, and optional `notes`.\n\n\
+         Constraints:\n\
+         - Do not do mutating implementation work in this step.\n\
+         - Final response: give the workset id, compact plan summary, verification recipe, and next command: `/run <workset>`.\n"
+    )
+}
+
+fn build_run_command_prompt(workset_id: &str) -> String {
+    format!(
+        "# /run: Workset Execution\n\n\
+         Workset id:\n\
+         {workset_id}\n\n\
+         Execute an existing workset.\n\n\
+         Steps:\n\
+         1. Call `workset_read` with this exact id. If it is missing or unusable, stop and tell the user to run `/plan <instruction>` first.\n\
+         2. Execute ready items according to the stored dependencies, scopes, roles, acceptance criteria, and verification recipe.\n\
+         3. Use `thread` for implementation and verification work. Each worker prompt must include owned scope and say the worker is not alone in the codebase and must not overwrite unrelated edits.\n\
+         4. Run the workset verification recipe when the implementation is complete, or explain why it could not be run.\n\
+         5. If the plan materially changes, replace the same workset id with `workset_define` and updated status, summary, items, and notes.\n\n\
+         Final response: summarize completed items, verification result, and current workset status.\n"
     )
 }
 
@@ -4362,21 +4407,18 @@ fn display_prompt_from_message(content: &str) -> String {
 
 fn workset_command_display_prompt(content: &str) -> Option<String> {
     let header = content.lines().next()?;
-    let kind = header.strip_prefix("# Workset Command: /")?.trim();
-    if !matches!(kind, "batch" | "batch-run" | "plan" | "review") {
+    let (kind, _) = header.strip_prefix("# /")?.split_once(':')?;
+    let kind = kind.trim();
+    if !matches!(kind, "plan" | "run") {
         return None;
     }
-    let instruction = content
-        .split_once("User instruction:\n")?
-        .1
-        .split_once("\n\nRequirements:")?
-        .0
-        .trim();
-    if instruction.is_empty() {
-        None
+    let marker = if kind == "run" {
+        "Workset id:\n"
     } else {
-        Some(format!("/{kind} {instruction}"))
-    }
+        "User instruction:\n"
+    };
+    let value = content.split_once(marker)?.1.split_once("\n\n")?.0.trim();
+    (!value.is_empty()).then(|| format!("/{kind} {value}"))
 }
 
 fn prompt_line(is_first: bool, content: &str, slash_mode: bool) -> Line<'static> {
@@ -5545,16 +5587,6 @@ fn file_status_style(status: &str) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-fn workset_kind_style(kind: &str) -> Style {
-    let color = match kind {
-        "batch" => Color::Magenta,
-        "plan" => Color::Cyan,
-        "review" => Color::Yellow,
-        _ => Color::Gray,
-    };
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
-}
-
 fn workset_status_style(status: &str) -> Style {
     let color = match status {
         "done" | "complete" | "completed" => Color::Green,
@@ -5737,30 +5769,30 @@ mod tests {
     }
 
     #[test]
-    fn batch_command_submits_raw_prompt() {
-        let dir = temp_dir("batch-submit");
+    fn plan_command_submits_raw_prompt() {
+        let dir = temp_dir("plan-submit");
         let mut app = App::new(metadata_for(&dir), &[], false);
-        app.composer.insert_str("/batch refresh auth flow");
+        app.composer.insert_str("/plan refresh auth flow");
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         match action {
-            AppAction::Submit(prompt) => assert_eq!(prompt, "/batch refresh auth flow"),
+            AppAction::Submit(prompt) => assert_eq!(prompt, "/plan refresh auth flow"),
             _ => panic!("expected submit"),
         }
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn batch_run_command_submits_raw_prompt() {
-        let dir = temp_dir("batch-run-submit");
+    fn run_command_submits_raw_prompt() {
+        let dir = temp_dir("run-submit");
         let mut app = App::new(metadata_for(&dir), &[], false);
-        app.composer.insert_str("/batch-run refresh auth flow");
+        app.composer.insert_str("/run auth-refresh");
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         match action {
-            AppAction::Submit(prompt) => assert_eq!(prompt, "/batch-run refresh auth flow"),
+            AppAction::Submit(prompt) => assert_eq!(prompt, "/run auth-refresh"),
             _ => panic!("expected submit"),
         }
         let _ = std::fs::remove_dir_all(dir);
@@ -5861,10 +5893,10 @@ mod tests {
     }
 
     #[test]
-    fn review_command_requires_instruction() {
-        let dir = temp_dir("review-usage");
+    fn run_command_requires_workset() {
+        let dir = temp_dir("run-usage");
         let mut app = App::new(metadata_for(&dir), &[], false);
-        app.composer.insert_str("/review");
+        app.composer.insert_str("/run");
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -5873,32 +5905,52 @@ mod tests {
             .composer_notice
             .as_ref()
             .expect("expected composer notice");
-        assert_eq!(notice.text, "usage: /review <instruction>");
+        assert_eq!(notice.text, "usage: /run <workset>");
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn batch_command_expands_to_workset_prompt() {
-        let expanded = expand_user_prompt("/batch refresh auth flow");
+    fn run_command_rejects_freeform_instruction() {
+        let dir = temp_dir("run-freeform");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.composer.insert_str("/run refresh auth flow");
 
-        assert!(expanded.contains("Workset Command: /batch"));
-        assert!(expanded.contains("workset_define"));
-        assert!(expanded.contains("kind: \"batch\""));
-        assert!(expanded.contains("refresh auth flow"));
-        assert!(expanded.contains("Do not dispatch mutating implementation threads yet."));
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(action, AppAction::None));
+        let notice = app
+            .composer_notice
+            .as_ref()
+            .expect("expected composer notice");
+        assert_eq!(notice.text, "usage: /run <workset>");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn batch_run_command_expands_to_executing_workset_prompt() {
-        let expanded = expand_user_prompt("/batch-run refresh auth flow");
+    fn plan_command_expands_to_workset_prompt() {
+        let expanded = expand_user_prompt("/plan refresh auth flow");
 
-        assert!(expanded.contains("Workset Command: /batch-run"));
+        assert!(expanded.contains("# /plan: Workset Planning"));
         assert!(expanded.contains("workset_define"));
-        assert!(expanded.contains("kind: \"batch\""));
+        assert!(expanded.contains("goal"));
+        assert!(expanded.contains("role"));
+        assert!(expanded.contains("depends_on"));
+        assert!(expanded.contains("acceptance"));
         assert!(expanded.contains("refresh auth flow"));
-        assert!(expanded.contains("Then execute the workset"));
-        assert!(expanded.contains("dispatch the implementation and verification threads"));
-        assert!(!expanded.contains("Do not dispatch mutating implementation threads yet."));
+        assert!(expanded.contains("Do not do mutating implementation work in this step."));
+        assert!(!expanded.contains("thread_name"));
+    }
+
+    #[test]
+    fn run_command_expands_to_existing_workset_prompt() {
+        let expanded = expand_user_prompt("/run auth-refresh");
+
+        assert!(expanded.contains("# /run: Workset Execution"));
+        assert!(expanded.contains("workset_read"));
+        assert!(expanded.contains("auth-refresh"));
+        assert!(expanded.contains("run `/plan <instruction>` first"));
+        assert!(expanded.contains("Use `thread` for implementation and verification work."));
+        assert!(!expanded.contains("Create exactly one durable"));
     }
 
     fn define_test_workset(path: &Path, session_id: &str, id: &str) {
@@ -5907,31 +5959,28 @@ mod tests {
             session_id,
             &store::WorksetDefinition {
                 id: id.to_string(),
-                kind: "batch".to_string(),
-                instruction: "refresh auth flow".to_string(),
+                goal: "refresh auth flow".to_string(),
                 status: "planned".to_string(),
-                summary: "Reviewable auth work units.".to_string(),
+                summary: "Auth work units.".to_string(),
                 verification_recipe: Some("cargo test".to_string()),
                 items: vec![
                     store::WorksetItemDefinition {
                         title: "Inspect auth flow".to_string(),
-                        thread_name: "research/auth".to_string(),
                         scope: "crates/nac/src".to_string(),
                         description: "Find auth flow entry points.".to_string(),
-                        item_kind: "research".to_string(),
-                        status: "planned".to_string(),
-                        source_threads: Vec::new(),
-                        last_summary: None,
+                        role: "research".to_string(),
+                        depends_on: Vec::new(),
+                        acceptance: "Auth entry points are identified.".to_string(),
+                        notes: None,
                     },
                     store::WorksetItemDefinition {
                         title: "Apply auth flow update".to_string(),
-                        thread_name: "impl/auth".to_string(),
                         scope: "crates/nac/src/tui.rs".to_string(),
                         description: "Make the scoped auth UI change.".to_string(),
-                        item_kind: "implement".to_string(),
-                        status: "planned".to_string(),
-                        source_threads: vec!["research/auth".to_string()],
-                        last_summary: None,
+                        role: "implement".to_string(),
+                        depends_on: vec!["Inspect auth flow".to_string()],
+                        acceptance: "The auth UI change is implemented.".to_string(),
+                        notes: None,
                     },
                 ],
             },
@@ -5944,7 +5993,7 @@ mod tests {
         let dir = temp_dir("workset-panel");
         let store_path = dir.join("store.db");
         let session_id = "session-worksets";
-        define_test_workset(&store_path, session_id, "batch-auth");
+        define_test_workset(&store_path, session_id, "plan-auth");
         let mut metadata = metadata_for(&dir);
         metadata.store_path = store_path.clone();
         metadata.session_id = Some(session_id.to_string());
@@ -5952,7 +6001,7 @@ mod tests {
         let app = App::new(metadata, &[], false);
 
         assert_eq!(app.worksets.items.len(), 1);
-        assert_eq!(app.worksets.items[0].id, "batch-auth");
+        assert_eq!(app.worksets.items[0].id, "plan-auth");
         assert_eq!(app.worksets.items[0].items.len(), 2);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5983,17 +6032,16 @@ mod tests {
     }
 
     #[test]
-    fn workset_item_lines_include_thread_scope_and_title() {
+    fn workset_item_lines_include_role_scope_title_and_acceptance() {
         let item = store::WorksetItemRecord {
             position: 1,
             title: "Apply auth flow update".to_string(),
-            thread_name: "impl/auth".to_string(),
             scope: "crates/nac/src/tui.rs".to_string(),
             description: "Make the scoped auth UI change.".to_string(),
-            item_kind: "implement".to_string(),
-            status: "planned".to_string(),
-            source_threads: vec!["research/auth".to_string()],
-            last_summary: None,
+            role: "implement".to_string(),
+            depends_on: vec!["Inspect auth flow".to_string()],
+            acceptance: "The auth UI change is implemented.".to_string(),
+            notes: None,
             updated_at: "2026-04-23 00:00:00".to_string(),
         };
 
@@ -6003,26 +6051,73 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("planned"));
         assert!(rendered.contains("implement"));
-        assert!(rendered.contains("impl/auth"));
+        assert!(rendered.contains("Inspect auth flow"));
         assert!(rendered.contains("Apply auth flow update"));
         assert!(rendered.contains("crates/nac/src/tui.rs"));
+        assert!(rendered.contains("The auth UI change is implemented."));
+    }
+
+    #[test]
+    fn workset_item_lines_wrap_long_fields() {
+        let item = store::WorksetItemRecord {
+            position: 1,
+            title: "Apply auth flow update with long title".to_string(),
+            scope: "crates/nac/src/tui.rs and crates/nac/src/store.rs".to_string(),
+            description: "Make the scoped auth UI change.".to_string(),
+            role: "implement".to_string(),
+            depends_on: vec!["Inspect auth flow before implementation starts".to_string()],
+            acceptance: "The auth UI change is implemented and verified with targeted tests."
+                .to_string(),
+            notes: Some("Keep unrelated worktree changes intact while editing.".to_string()),
+            updated_at: "2026-04-23 00:00:00".to_string(),
+        };
+
+        let rendered = render_workset_item_lines(&item, 36)
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+        let joined = rendered.join("\n");
+
+        assert!(rendered.len() > 6);
+        assert!(joined.contains("update with long"));
+        assert!(joined.contains("crates/nac/src/store.rs"));
+        assert!(joined.contains("targeted tests."));
+        assert!(!joined.contains('…'));
+    }
+
+    #[test]
+    fn wrapped_prefixed_lines_use_continuation_indent() {
+        let mut lines = Vec::new();
+        push_wrapped_prefixed_lines(
+            &mut lines,
+            "  verify ",
+            "cargo test -p nac plus a focused manual check",
+            28,
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::DarkGray),
+        );
+
+        let rendered = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert!(rendered.len() > 1);
+        assert!(rendered[0].starts_with("  verify "));
+        assert!(rendered[1].starts_with("         "));
+        assert!(!rendered.join("\n").contains('…'));
     }
 
     #[test]
     fn workset_prompt_displays_as_original_slash_command() {
-        let expanded = build_workset_command_prompt("review", "split this into reviewable units");
-        let expanded_run =
-            build_workset_command_prompt_with_mode("batch-run", "batch", "do the sweep", true);
+        let expanded = build_plan_command_prompt("split this into reviewable units");
+        let expanded_run = build_run_command_prompt("auth-refresh");
 
         assert_eq!(
             display_prompt_from_message(&expanded),
-            "/review split this into reviewable units"
+            "/plan split this into reviewable units"
         );
         assert_eq!(
             display_prompt_from_message(&expanded_run),
-            "/batch-run do the sweep"
+            "/run auth-refresh"
         );
     }
 
@@ -6030,14 +6125,14 @@ mod tests {
     fn run_started_does_not_replace_submitted_prompt() {
         let dir = temp_dir("run-started-prompt");
         let mut app = App::new(metadata_for(&dir), &[], false);
-        app.note_prompt_submitted("/batch refresh auth flow");
+        app.note_prompt_submitted("/plan refresh auth flow");
 
         app.apply_agent_event(AgentEvent::RunStarted {
             thread_name: None,
-            prompt_preview: "# Workset Command: /batch".to_string(),
+            prompt_preview: "# /plan: Workset Planning".to_string(),
         });
 
-        assert_eq!(app.last_prompt.as_deref(), Some("/batch refresh auth flow"));
+        assert_eq!(app.last_prompt.as_deref(), Some("/plan refresh auth flow"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

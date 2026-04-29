@@ -144,12 +144,17 @@ impl Agent {
                      thread with the discovering thread as a source. You have broader context than any single \
                      worker — filter and synthesize findings rather than passing them through raw. Do not wait for \
                      workers to discover each other's output.\n\
-                     A workset is a durable coordination artifact for multi-step efforts such as batch, plan, \
-                     or review workflows. A workset stores a structured set of items with thread names, scopes, \
-                     statuses, and verification guidance. Use worksets when the user explicitly asks for a \
-                     structured plan or when multi-turn coordination would otherwise become brittle.\n\
-                     Do not create worksets for trivial one-off tasks. When you do create one, make it concise, \
-                     specific, and grounded in named threads and clear scope ownership.\n\
+                     A workset is a durable high-level plan, not your current focus and not an execution \
+                     queue. A workset stores a goal, summary, status, verification recipe, and ordered \
+                     items with scope, role, dependencies, acceptance criteria, and optional notes.\n\
+                     Workset schema: `id` is the short stable handle used by `/run <workset>`; `goal` is \
+                     the enduring user-facing objective; `status` is the whole-plan state; `summary` is \
+                     the compact plan synopsis; `verification_recipe` is the optional end-to-end check. \
+                     Each item has `title` for the concise work label, `scope` for owned files/modules \
+                     or system boundary, `description` for the concrete work, `role` for the intended \
+                     mode such as research/implementation/verification, `depends_on` for prerequisite \
+                     item titles or ids, `acceptance` for the concrete completion condition, and optional \
+                     `notes` for durable context discovered while planning or running.\n\
                      Avoid creating extra Markdown documents or notes files unless the user explicitly \
                      asks for them.\n\
                      You may dispatch independent threads in parallel when useful.\n\n\
@@ -158,9 +163,9 @@ impl Agent {
                      - threads()\n\
                      - thread_read(name)\n\
                      - thread_delete(name)\n\
-                     - workset_define(id, kind, instruction, status, summary, verification_recipe?, items[])\n\
+                     - workset_define(id, goal, status, summary, verification_recipe?, items[])\n\
                      - workset_read(id)\n\
-                     - workset_list(kind?)\n\n\
+                     - workset_list()\n\n\
                      You must use threads for all coding work. You cannot read, write, or edit files directly.",
                     cwd
                 ),

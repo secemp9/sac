@@ -34,13 +34,12 @@ pub struct WorkerContext {
 pub struct WorksetItemRecord {
     pub position: i64,
     pub title: String,
-    pub thread_name: String,
     pub scope: String,
     pub description: String,
-    pub item_kind: String,
-    pub status: String,
-    pub source_threads: Vec<String>,
-    pub last_summary: Option<String>,
+    pub role: String,
+    pub depends_on: Vec<String>,
+    pub acceptance: String,
+    pub notes: Option<String>,
     pub updated_at: String,
 }
 
@@ -48,8 +47,7 @@ pub struct WorksetItemRecord {
 pub struct WorksetRecord {
     pub id: String,
     pub session_id: String,
-    pub kind: String,
-    pub instruction: String,
+    pub goal: String,
     pub status: String,
     pub summary: String,
     pub verification_recipe: Option<String>,
@@ -61,7 +59,6 @@ pub struct WorksetRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorksetSummary {
     pub id: String,
-    pub kind: String,
     pub status: String,
     pub summary: String,
     pub item_count: i64,
@@ -71,20 +68,18 @@ pub struct WorksetSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorksetItemDefinition {
     pub title: String,
-    pub thread_name: String,
     pub scope: String,
     pub description: String,
-    pub item_kind: String,
-    pub status: String,
-    pub source_threads: Vec<String>,
-    pub last_summary: Option<String>,
+    pub role: String,
+    pub depends_on: Vec<String>,
+    pub acceptance: String,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorksetDefinition {
     pub id: String,
-    pub kind: String,
-    pub instruction: String,
+    pub goal: String,
     pub status: String,
     pub summary: String,
     pub verification_recipe: Option<String>,
@@ -256,8 +251,8 @@ pub fn define_workset(path: &Path, session_id: &str, workset: &WorksetDefinition
         params![
             workset.id,
             session_id,
-            workset.kind,
-            workset.instruction,
+            "plan",
+            workset.goal,
             workset.status,
             workset.summary,
             workset.verification_recipe,
@@ -272,23 +267,27 @@ pub fn define_workset(path: &Path, session_id: &str, workset: &WorksetDefinition
     )?;
 
     for (index, item) in workset.items.iter().enumerate() {
+        // Worksets used to expose kind/instruction/thread-oriented fields. Keep the
+        // old SQLite columns as compatibility storage while the public schema uses
+        // goal/role/depends_on/acceptance/notes.
         tx.execute(
             "INSERT INTO workset_items (
                  workset_id, session_id, position, title, thread_name, scope, description,
-                 item_kind, status, source_threads_json, last_summary, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 item_kind, status, source_threads_json, last_summary, acceptance, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 workset.id,
                 session_id,
                 index as i64 + 1,
                 item.title,
-                item.thread_name,
+                "",
                 item.scope,
                 item.description,
-                item.item_kind,
-                item.status,
-                serde_json::to_string(&item.source_threads)?,
-                item.last_summary,
+                item.role,
+                "planned",
+                serde_json::to_string(&item.depends_on)?,
+                item.notes,
+                item.acceptance,
                 now,
             ],
         )?;
@@ -302,7 +301,7 @@ pub fn read_workset(path: &Path, session_id: &str, id: &str) -> Result<Option<Wo
     let conn = open_connection(path)?;
     let Some(mut workset) = conn
         .query_row(
-            "SELECT id, session_id, kind, instruction, status, summary, verification_recipe, created_at, updated_at
+            "SELECT id, session_id, instruction, status, summary, verification_recipe, created_at, updated_at
              FROM worksets
              WHERE id = ?1 AND session_id = ?2",
             params![id, session_id],
@@ -316,45 +315,26 @@ pub fn read_workset(path: &Path, session_id: &str, id: &str) -> Result<Option<Wo
     Ok(Some(workset))
 }
 
-pub fn list_worksets(
-    path: &Path,
-    session_id: &str,
-    kind: Option<&str>,
-) -> Result<Vec<WorksetSummary>> {
+pub fn list_worksets(path: &Path, session_id: &str) -> Result<Vec<WorksetSummary>> {
     let conn = open_connection(path)?;
-    let sql = if kind.is_some() {
-        "SELECT w.id, w.kind, w.status, w.summary,
-                (SELECT COUNT(*) FROM workset_items i
-                 WHERE i.workset_id = w.id AND i.session_id = w.session_id) AS item_count,
-                w.updated_at
-         FROM worksets w
-         WHERE w.session_id = ?1 AND w.kind = ?2
-         ORDER BY w.updated_at DESC, w.id ASC"
-    } else {
-        "SELECT w.id, w.kind, w.status, w.summary,
-                (SELECT COUNT(*) FROM workset_items i
-                 WHERE i.workset_id = w.id AND i.session_id = w.session_id) AS item_count,
-                w.updated_at
+    let sql = "SELECT w.id, w.status, w.summary,
+               (SELECT COUNT(*) FROM workset_items i
+                WHERE i.workset_id = w.id AND i.session_id = w.session_id) AS item_count,
+               w.updated_at
          FROM worksets w
          WHERE w.session_id = ?1
-         ORDER BY w.updated_at DESC, w.id ASC"
-    };
+         ORDER BY w.updated_at DESC, w.id ASC";
     let mut stmt = conn.prepare(sql)?;
-    let mut rows = if let Some(kind) = kind {
-        stmt.query(params![session_id, kind])?
-    } else {
-        stmt.query(params![session_id])?
-    };
+    let mut rows = stmt.query(params![session_id])?;
 
     let mut worksets = Vec::new();
     while let Some(row) = rows.next()? {
         worksets.push(WorksetSummary {
             id: row.get(0)?,
-            kind: row.get(1)?,
-            status: row.get(2)?,
-            summary: row.get(3)?,
-            item_count: row.get(4)?,
-            updated_at: row.get(5)?,
+            status: row.get(1)?,
+            summary: row.get(2)?,
+            item_count: row.get(3)?,
+            updated_at: row.get(4)?,
         });
     }
     Ok(worksets)
@@ -409,9 +389,8 @@ pub fn render_thread_document(thread_name: &str, episodes: &[EpisodeRecord]) -> 
 
 pub fn render_workset_document(workset: &WorksetRecord) -> String {
     let mut rendered = format!(
-        "Workset \"{}\" | kind: {} | status: {} | {} item(s)",
+        "Workset \"{}\" | status: {} | {} item(s)",
         workset.id,
-        workset.kind,
         workset.status,
         workset.items.len()
     );
@@ -423,7 +402,7 @@ pub fn render_workset_document(workset: &WorksetRecord) -> String {
             &workset.summary
         }
     ));
-    rendered.push_str(&format!("\ninstruction: {}", workset.instruction));
+    rendered.push_str(&format!("\ngoal: {}", workset.goal));
     if let Some(recipe) = workset.verification_recipe.as_deref() {
         rendered.push_str(&format!("\nverification: {}", recipe));
     }
@@ -439,22 +418,21 @@ pub fn render_workset_document(workset: &WorksetRecord) -> String {
 
     rendered.push_str("\n\nItems:");
     for item in &workset.items {
-        let sources = if item.source_threads.is_empty() {
+        let dependencies = if item.depends_on.is_empty() {
             "none".to_string()
         } else {
-            item.source_threads.join(", ")
+            item.depends_on.join(", ")
         };
         rendered.push_str(&format!(
             "\n\n{}. [{}] {}",
-            item.position, item.status, item.title
+            item.position, item.role, item.title
         ));
-        rendered.push_str(&format!("\n   thread: {}", item.thread_name));
         rendered.push_str(&format!("\n   scope: {}", item.scope));
-        rendered.push_str(&format!("\n   kind: {}", item.item_kind));
-        rendered.push_str(&format!("\n   sources: {}", sources));
+        rendered.push_str(&format!("\n   depends on: {}", dependencies));
         rendered.push_str(&format!("\n   description: {}", item.description));
-        if let Some(summary) = item.last_summary.as_deref() {
-            rendered.push_str(&format!("\n   last summary: {}", summary));
+        rendered.push_str(&format!("\n   acceptance: {}", item.acceptance));
+        if let Some(notes) = item.notes.as_deref() {
+            rendered.push_str(&format!("\n   notes: {}", notes));
         }
     }
     rendered
@@ -468,8 +446,8 @@ pub fn render_workset_list(worksets: &[WorksetSummary]) -> String {
     let mut rendered = String::from("Worksets:");
     for workset in worksets {
         rendered.push_str(&format!(
-            "\n- {} | {} | {} | {} item(s) | updated {}",
-            workset.id, workset.kind, workset.status, workset.item_count, workset.updated_at
+            "\n- {} | {} | {} item(s) | updated {}",
+            workset.id, workset.status, workset.item_count, workset.updated_at
         ));
         if !workset.summary.is_empty() {
             rendered.push_str(&format!("\n  {}", workset.summary));
@@ -529,6 +507,7 @@ fn open_connection(path: &Path) -> Result<Connection> {
              status TEXT NOT NULL,
              source_threads_json TEXT NOT NULL,
              last_summary TEXT,
+             acceptance TEXT NOT NULL DEFAULT '',
              updated_at TEXT NOT NULL,
              PRIMARY KEY (workset_id, session_id, position),
              FOREIGN KEY (workset_id, session_id) REFERENCES worksets(id, session_id)
@@ -540,7 +519,25 @@ fn open_connection(path: &Path) -> Result<Connection> {
          CREATE INDEX IF NOT EXISTS idx_workset_items_workset_position
              ON workset_items(workset_id, session_id, position);",
     )?;
+    ensure_workset_items_acceptance_column(&conn)?;
     Ok(conn)
+}
+
+fn ensure_workset_items_acceptance_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(workset_items)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == "acceptance" {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        "ALTER TABLE workset_items ADD COLUMN acceptance TEXT NOT NULL DEFAULT ''",
+        [],
+    )?;
+    Ok(())
 }
 
 fn ensure_thread_in_tx(tx: &Transaction<'_>, session_id: &str, thread_name: &str) -> Result<()> {
@@ -605,13 +602,12 @@ fn row_to_workset(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorksetRecord> {
     Ok(WorksetRecord {
         id: row.get(0)?,
         session_id: row.get(1)?,
-        kind: row.get(2)?,
-        instruction: row.get(3)?,
-        status: row.get(4)?,
-        summary: row.get(5)?,
-        verification_recipe: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        goal: row.get(2)?,
+        status: row.get(3)?,
+        summary: row.get(4)?,
+        verification_recipe: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
         items: Vec::new(),
     })
 }
@@ -622,8 +618,8 @@ fn load_workset_items(
     workset_id: &str,
 ) -> Result<Vec<WorksetItemRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT position, title, thread_name, scope, description, item_kind, status,
-                source_threads_json, last_summary, updated_at
+        "SELECT position, title, scope, description, item_kind,
+                source_threads_json, last_summary, acceptance, updated_at
          FROM workset_items
          WHERE workset_id = ?1 AND session_id = ?2
          ORDER BY position ASC",
@@ -631,20 +627,19 @@ fn load_workset_items(
     let mut rows = stmt.query(params![workset_id, session_id])?;
     let mut items = Vec::new();
     while let Some(row) = rows.next()? {
-        let source_threads_json: String = row.get(7)?;
-        let source_threads = serde_json::from_str::<Vec<String>>(&source_threads_json)
-            .unwrap_or_else(|_| vec![source_threads_json]);
+        let depends_on_json: String = row.get(5)?;
+        let depends_on = serde_json::from_str::<Vec<String>>(&depends_on_json)
+            .unwrap_or_else(|_| vec![depends_on_json]);
         items.push(WorksetItemRecord {
             position: row.get(0)?,
             title: row.get(1)?,
-            thread_name: row.get(2)?,
-            scope: row.get(3)?,
-            description: row.get(4)?,
-            item_kind: row.get(5)?,
-            status: row.get(6)?,
-            source_threads,
-            last_summary: row.get(8)?,
-            updated_at: row.get(9)?,
+            scope: row.get(2)?,
+            description: row.get(3)?,
+            role: row.get(4)?,
+            depends_on,
+            notes: row.get(6)?,
+            acceptance: row.get(7)?,
+            updated_at: row.get(8)?,
         });
     }
     Ok(items)
@@ -799,53 +794,57 @@ mod tests {
 
         let session_id = "session-workset";
         let definition = WorksetDefinition {
-            id: "batch-auth-refresh".to_string(),
-            kind: "batch".to_string(),
-            instruction: "refresh auth flow".to_string(),
+            id: "auth-refresh".to_string(),
+            goal: "refresh auth flow".to_string(),
             status: "planned".to_string(),
-            summary: "Split auth refresh into reviewable units.".to_string(),
+            summary: "Split auth refresh into scoped units.".to_string(),
             verification_recipe: Some("cargo test -p nac".to_string()),
             items: vec![
                 WorksetItemDefinition {
                     title: "Inspect auth state handling".to_string(),
-                    thread_name: "research/auth-state".to_string(),
                     scope: "crates/nac/src/agent.rs".to_string(),
                     description: "Map auth state behavior and risks.".to_string(),
-                    item_kind: "research".to_string(),
-                    status: "planned".to_string(),
-                    source_threads: Vec::new(),
-                    last_summary: None,
+                    role: "research".to_string(),
+                    depends_on: Vec::new(),
+                    acceptance: "Auth state behavior and risks are mapped.".to_string(),
+                    notes: None,
                 },
                 WorksetItemDefinition {
                     title: "Implement auth state update".to_string(),
-                    thread_name: "impl/auth-state".to_string(),
                     scope: "crates/nac/src/tui.rs".to_string(),
                     description: "Apply the focused code change.".to_string(),
-                    item_kind: "implement".to_string(),
-                    status: "planned".to_string(),
-                    source_threads: vec!["research/auth-state".to_string()],
-                    last_summary: Some("waiting on research".to_string()),
+                    role: "implement".to_string(),
+                    depends_on: vec!["Inspect auth state handling".to_string()],
+                    acceptance: "Focused code change is applied.".to_string(),
+                    notes: Some("waiting on research".to_string()),
                 },
             ],
         };
 
         define_workset(&store_path, session_id, &definition).unwrap();
 
-        let workset = read_workset(&store_path, session_id, "batch-auth-refresh")
+        let workset = read_workset(&store_path, session_id, "auth-refresh")
             .unwrap()
             .expect("expected workset");
-        assert_eq!(workset.kind, "batch");
+        assert_eq!(workset.goal, "refresh auth flow");
         assert_eq!(workset.items.len(), 2);
-        assert_eq!(workset.items[1].source_threads, vec!["research/auth-state"]);
+        assert_eq!(
+            workset.items[1].depends_on,
+            vec!["Inspect auth state handling"]
+        );
+        assert_eq!(
+            workset.items[1].acceptance,
+            "Focused code change is applied."
+        );
 
-        let listed = list_worksets(&store_path, session_id, Some("batch")).unwrap();
+        let listed = list_worksets(&store_path, session_id).unwrap();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, "batch-auth-refresh");
+        assert_eq!(listed[0].id, "auth-refresh");
 
         let rendered = render_workset_document(&workset);
         assert!(rendered.contains("Inspect auth state handling"));
         assert!(rendered.contains("verification: cargo test -p nac"));
-        assert!(render_workset_list(&listed).contains("batch-auth-refresh"));
+        assert!(render_workset_list(&listed).contains("auth-refresh"));
 
         let _ = std::fs::remove_dir_all(store_path.parent().unwrap());
     }
