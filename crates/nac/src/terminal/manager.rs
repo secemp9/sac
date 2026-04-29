@@ -35,26 +35,41 @@ impl TerminalManager {
         rows: u16,
         sandbox: Option<&SandboxSession>,
     ) -> Result<TerminalInfo> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(mut old) = sessions.remove(&name) {
-            let _ = old.kill();
+        // Remove and kill existing session with same name — drop lock before awaiting kill
+        let old = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.remove(&name)
+        };
+        if let Some(mut old) = old {
+            let _ = old.kill().await;
         }
-        while sessions.len() >= self.max_sessions {
-            let oldest_key = sessions
-                .iter()
-                .min_by_key(|(_, s)| s.created_at)
-                .map(|(k, _)| k.clone());
-            if let Some(key) = oldest_key {
-                if let Some(mut s) = sessions.remove(&key) {
-                    let _ = s.kill();
+
+        // Evict oldest sessions if at capacity — collect first, kill after dropping lock
+        let evicted: Vec<TerminalSession> = {
+            let mut sessions = self.sessions.lock().await;
+            let mut evicted = Vec::new();
+            while sessions.len() >= self.max_sessions {
+                let oldest_key = sessions
+                    .iter()
+                    .min_by_key(|(_, s)| s.created_at)
+                    .map(|(k, _)| k.clone());
+                if let Some(key) = oldest_key {
+                    if let Some(s) = sessions.remove(&key) {
+                        evicted.push(s);
+                    }
+                } else {
+                    break;
                 }
-            } else {
-                break;
             }
+            evicted
+        };
+        for mut s in evicted {
+            let _ = s.kill().await;
         }
+
         let session = TerminalSession::spawn(name.clone(), cwd, cols, rows, sandbox)?;
         let info = self.session_info(&name, &session);
-        sessions.insert(name, session);
+        self.sessions.lock().await.insert(name, session);
         Ok(info)
     }
 
@@ -93,8 +108,7 @@ impl TerminalManager {
             sessions.get(name).map_or(false, |s| s.is_alive())
         };
         if !alive {
-            let mut sessions = self.sessions.lock().await;
-            sessions.remove(name);
+            self.remove(name).await.ok();
         }
 
         let (output_text, truncated) = head_tail_truncate(&output, max_output);
@@ -134,7 +148,7 @@ impl TerminalManager {
         let output = Self::collect_output_direct(&mut session, yield_ms, start).await;
 
         let (output_text, truncated) = head_tail_truncate(&output, max_output);
-        let _ = session.kill();
+        let _ = session.kill().await;
         Ok(TerminalOutput {
             output: output_text,
             exit_code: None,
@@ -145,17 +159,23 @@ impl TerminalManager {
     }
 
     pub async fn remove(&self, name: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(mut session) = sessions.remove(name) {
-            session.kill()?;
+        let session = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.remove(name)
+        };
+        if let Some(mut session) = session {
+            session.kill().await?;
         }
         Ok(())
     }
 
     pub async fn remove_all(&self) {
-        let mut sessions = self.sessions.lock().await;
-        for (_, mut session) in sessions.drain() {
-            let _ = session.kill();
+        let sessions: Vec<TerminalSession> = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.drain().map(|(_, s)| s).collect()
+        };
+        for mut session in sessions {
+            let _ = session.kill().await;
         }
     }
 
@@ -201,13 +221,15 @@ impl TerminalManager {
         };
 
         loop {
-            // Drain all available output brief lock
-            let current = {
+            // Drain all available output — brief lock; also capture alive flag
+            let (current, alive) = {
                 let mut sessions = self.sessions.lock().await;
                 let session = sessions
                     .get_mut(name)
                     .ok_or_else(|| anyhow!("session vanished"))?;
-                session.read_screen()
+                let current = session.read_screen();
+                let alive = session.is_alive();
+                (current, alive)
             };
 
             if !current.is_empty() {
@@ -224,6 +246,11 @@ impl TerminalManager {
                 // Got new output; yield to executor then immediately retry drain
                 tokio::task::yield_now().await;
                 continue;
+            }
+
+            // No new output — if process is dead and we have output, return early
+            if !alive && !output.is_empty() {
+                return Ok(output);
             }
 
             // Screen unchanged — wait for remaining deadline
@@ -258,6 +285,7 @@ impl TerminalManager {
 
         loop {
             let current = session.read_screen();
+            let alive = session.is_alive();
 
             if !current.is_empty() {
                 if !output.is_empty() {
@@ -271,6 +299,11 @@ impl TerminalManager {
 
                 tokio::task::yield_now().await;
                 continue;
+            }
+
+            // No new output — if process is dead and we have output, return early
+            if !alive && !output.is_empty() {
+                return output;
             }
 
             // Screen unchanged — wait for remaining deadline

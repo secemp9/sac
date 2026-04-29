@@ -119,6 +119,7 @@ impl TerminalSession {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
                         alive_clone.store(false, Ordering::SeqCst);
+                        notify_clone.notify_one();
                         break;
                     }
                     Ok(n) => {
@@ -200,9 +201,21 @@ impl TerminalSession {
         self.state.screen().application_cursor()
     }
 
-    pub fn kill(&mut self) -> Result<()> {
+    pub async fn kill(&mut self) -> Result<()> {
         self.kill_process_group();
-        self.reap_child();
+        // Wait briefly for SIGTERM to take effect
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Check if still alive, escalate to SIGKILL
+        #[cfg(unix)]
+        if let Some(pid) = self.child.process_id() {
+            unsafe {
+                let pgid = libc::getpgid(pid as libc::pid_t);
+                if pgid > 0 && libc::kill(-pgid, 0) == 0 {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+        }
+        self.reap_child().await;
         self.alive.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -214,10 +227,6 @@ impl TerminalSession {
                 let pgid = libc::getpgid(pid as libc::pid_t);
                 if pgid > 0 {
                     libc::kill(-pgid, libc::SIGTERM);
-                    std::thread::sleep(Duration::from_millis(500));
-                    if libc::kill(-pgid, 0) == 0 {
-                        libc::kill(-pgid, libc::SIGKILL);
-                    }
                 }
             }
         }
@@ -226,11 +235,11 @@ impl TerminalSession {
     #[cfg(not(unix))]
     fn kill_process_group(&self) {}
 
-    fn reap_child(&mut self) {
+    async fn reap_child(&mut self) {
         for _ in 0..10 {
             match self.child.try_wait() {
                 Ok(Some(_)) => return,
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
                 Err(_) => break,
             }
         }
@@ -238,7 +247,7 @@ impl TerminalSession {
         for _ in 0..20 {
             match self.child.try_wait() {
                 Ok(Some(_)) | Err(_) => return,
-                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
     }
@@ -263,6 +272,7 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.writer.flush();
+        self.kill_process_group();
         self.alive.store(false, Ordering::SeqCst);
     }
 }
