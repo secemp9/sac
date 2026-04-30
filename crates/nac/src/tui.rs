@@ -884,8 +884,9 @@ impl App {
                 }
                 Message::Assistant {
                     content: Some(content),
+                    tool_calls,
                     ..
-                } => {
+                } if tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) => {
                     if let Some(previous) = self.last_response.replace(content.clone()) {
                         self.previous_response = Some(previous);
                     }
@@ -5512,7 +5513,9 @@ fn visible_restored_message_count(messages: &[Message]) -> usize {
         .iter()
         .filter(|message| match message {
             Message::User { .. } => true,
-            Message::Assistant { content, .. } => content.is_some(),
+            Message::Assistant { content, tool_calls, .. } => {
+                content.is_some() && tool_calls.as_ref().map_or(true, |tc| tc.is_empty())
+            }
             _ => false,
         })
         .count()
