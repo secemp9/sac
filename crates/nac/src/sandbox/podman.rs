@@ -1,13 +1,40 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio as StdStdio;
 use std::process::{Command as StdCommand, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use portable_pty::CommandBuilder as PtyCommandBuilder;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::time::timeout;
 
 use super::{MountSpec, SandboxSpec};
+
+const SANDBOX_EXEC_WRAPPER: &str = r#"pidfile=$2
+if command -v setsid >/dev/null 2>&1; then
+  setsid bash -c "$1" &
+else
+  set -m
+  bash -c "$1" &
+fi
+pid=$!
+printf '%s' "$pid" > "$pidfile"
+wait "$pid"
+status=$?
+rm -f "$pidfile"
+exit "$status""#;
+
+const SANDBOX_KILL_WRAPPER: &str = r#"pidfile=$1
+pid=$(cat "$pidfile" 2>/dev/null) || exit 0
+if [ -n "$pid" ]; then
+  kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  sleep 0.5
+  kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+fi
+rm -f "$pidfile""#;
 
 pub(crate) struct PodmanSession {
     spec: SandboxSpec,
@@ -98,7 +125,7 @@ impl PodmanSession {
         stdin: Option<Vec<u8>>,
     ) -> Result<std::process::Output> {
         let mut command = Command::new("podman");
-        command.args(self.exec_args(program, args, stdin.is_some()));
+        command.args(self.exec_args(program, args, stdin.is_some(), false));
 
         if stdin.is_some() {
             command.stdin(Stdio::piped());
@@ -146,7 +173,77 @@ impl PodmanSession {
         command
     }
 
-    fn exec_args(&self, program: &str, args: &[String], interactive: bool) -> Vec<OsString> {
+    pub(crate) fn terminal_pty_command(
+        &self,
+        cwd: Option<&Path>,
+        envs: &[(String, String)],
+    ) -> PtyCommandBuilder {
+        let mut cmd = PtyCommandBuilder::new("podman");
+        cmd.arg("exec");
+        cmd.arg("-it");
+        cmd.arg("--workdir");
+        let wd = match cwd {
+            Some(p) => p.display().to_string(),
+            None => self.spec.workdir.display().to_string(),
+        };
+        cmd.arg(&wd);
+        for (key, value) in envs {
+            cmd.arg("--env");
+            cmd.arg(format!("{key}={value}"));
+        }
+        cmd.arg(&self.container_name);
+        cmd.arg("bash");
+        cmd
+    }
+
+    pub(crate) fn terminal_pipe_command(
+        &self,
+        cmd_str: &str,
+        cwd: Option<&Path>,
+        envs: &[(String, String)],
+    ) -> (Command, String) {
+        let pidfile = make_sandbox_pidfile();
+        let mut command = Command::new("podman");
+        command.arg("exec").arg("--workdir");
+        let wd = cwd
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| self.spec.workdir.display().to_string());
+        command.arg(&wd);
+        for (key, value) in envs {
+            command.arg("--env").arg(format!("{key}={value}"));
+        }
+        command
+            .arg(&self.container_name)
+            .arg("bash")
+            .arg("-lc")
+            .arg(SANDBOX_EXEC_WRAPPER)
+            .arg("nac-exec")
+            .arg(cmd_str)
+            .arg(&pidfile);
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        (command, pidfile)
+    }
+
+    pub(crate) async fn terminal_pipe_kill(&self, pidfile: &str) -> Result<()> {
+        let mut command = Command::new("podman");
+        command
+            .arg("exec")
+            .arg(&self.container_name)
+            .arg("sh")
+            .arg("-c")
+            .arg(SANDBOX_KILL_WRAPPER)
+            .arg("nac-kill")
+            .arg(pidfile)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let _ = timeout(Duration::from_secs(2), command.status()).await;
+        Ok(())
+    }
+
+    fn exec_args(&self, program: &str, args: &[String], interactive: bool, tty: bool) -> Vec<OsString> {
         let mut command_args = vec![
             OsString::from("exec"),
             OsString::from("--workdir"),
@@ -154,6 +251,9 @@ impl PodmanSession {
         ];
         if interactive {
             command_args.push(OsString::from("-i"));
+        }
+        if tty {
+            command_args.push(OsString::from("-t"));
         }
         command_args.push(OsString::from(self.container_name.clone()));
         command_args.push(OsString::from(program));
@@ -286,6 +386,12 @@ impl Drop for PodmanSession {
             .stderr(StdStdio::null())
             .spawn();
     }
+}
+
+fn make_sandbox_pidfile() -> String {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    format!("/tmp/nac-exec-{}-{id}.pid", std::process::id())
 }
 
 fn volume_arg(mount: &MountSpec) -> String {
@@ -460,6 +566,7 @@ mod tests {
             "python3",
             &["-c".to_string(), "print('hi')".to_string()],
             true,
+            false,
         );
         let rendered: Vec<String> = args
             .into_iter()
@@ -467,16 +574,74 @@ mod tests {
             .collect();
         assert_eq!(rendered.first().map(String::as_str), Some("exec"));
         assert!(rendered.contains(&"-i".to_string()));
+        assert!(!rendered.contains(&"-t".to_string()));
     }
 
     #[test]
     fn exec_args_skip_interactive_mode_without_stdin() {
-        let args =
-            sample_session().exec_args("bash", &["-lc".to_string(), "pwd".to_string()], false);
+        let args = sample_session().exec_args(
+            "bash",
+            &["-lc".to_string(), "pwd".to_string()],
+            false,
+            false,
+        );
         let rendered: Vec<String> = args
             .into_iter()
             .map(|value| value.to_string_lossy().to_string())
             .collect();
         assert!(!rendered.contains(&"-i".to_string()));
+        assert!(!rendered.contains(&"-t".to_string()));
+    }
+
+    #[test]
+    fn exec_args_includes_it_flags_when_interactive_and_tty() {
+        let args = sample_session().exec_args(
+            "bash",
+            &[],
+            true,
+            true,
+        );
+        let rendered: Vec<String> = args
+            .into_iter()
+            .map(|value| value.to_string_lossy().to_string())
+            .collect();
+        assert!(rendered.contains(&"-i".to_string()));
+        assert!(rendered.contains(&"-t".to_string()));
+    }
+
+    #[test]
+    fn terminal_pipe_command_includes_env_vars() {
+        let session = sample_session();
+        let (command, _pidfile) = session.terminal_pipe_command(
+            "echo hello",
+            None,
+            &[
+                ("TERM".to_string(), "dumb".to_string()),
+                ("PAGER".to_string(), "cat".to_string()),
+            ],
+        );
+        // Render the command as a debug string to inspect arguments
+        let debug = format!("{command:?}");
+        assert!(debug.contains("--env"), "expected --env flag: {debug}");
+        assert!(debug.contains("TERM=dumb"), "expected TERM=dumb: {debug}");
+        assert!(debug.contains("PAGER=cat"), "expected PAGER=cat: {debug}");
+    }
+
+    #[test]
+    fn sandbox_pidfile_path_is_container_tmp_path() {
+        let path = make_sandbox_pidfile();
+        assert!(path.starts_with("/tmp/nac-exec-"));
+        assert!(path.ends_with(".pid"));
+    }
+
+    #[test]
+    fn sandbox_wrappers_track_and_kill_process_group() {
+        assert!(SANDBOX_EXEC_WRAPPER.contains("setsid bash -c"));
+        assert!(
+            SANDBOX_EXEC_WRAPPER.contains("printf '%s' \"$pid\" > \"$pidfile\""),
+            "exec wrapper: {SANDBOX_EXEC_WRAPPER}"
+        );
+        assert!(SANDBOX_KILL_WRAPPER.contains("kill -TERM \"-$pid\""));
+        assert!(SANDBOX_KILL_WRAPPER.contains("kill -KILL \"-$pid\""));
     }
 }

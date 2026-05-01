@@ -56,22 +56,17 @@ impl TerminalSession {
         let resolved_cwd: PathBuf;
 
         if let Some(sb) = sandbox {
-            cmd = CommandBuilder::new("podman");
-            cmd.arg("exec");
-            cmd.arg("-it");
-            cmd.arg("--workdir");
-            let wd = match &cwd {
-                Some(p) => p.display().to_string(),
-                None => sb.workdir_display(),
+            resolved_cwd = match cwd.as_ref() {
+                Some(p) => p.clone(),
+                None => PathBuf::from(sb.workdir_display()),
             };
-            cmd.arg(&wd);
-            for (key, value) in terminal_env() {
-                cmd.arg("--env");
-                cmd.arg(format!("{key}={value}"));
-            }
-            cmd.arg(sb.container_name());
-            cmd.arg("bash");
-            resolved_cwd = PathBuf::from(wd);
+
+            let envs: Vec<(String, String)> = terminal_env()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+
+            cmd = sb.terminal_pty_command(cwd.as_deref(), &envs);
         } else {
             if let Some(ref p) = cwd {
                 cmd.cwd(p);
@@ -273,7 +268,7 @@ impl Drop for TerminalSession {
     }
 }
 
-fn terminal_env() -> &'static [(&'static str, &'static str)] {
+pub(crate) fn terminal_env() -> &'static [(&'static str, &'static str)] {
     &[
         ("TERM", "dumb"),
         ("PAGER", "cat"),
