@@ -135,7 +135,7 @@ impl SandboxSession {
         &self,
         cwd: Option<&Path>,
         envs: &[(String, String)],
-    ) -> PtyCommandBuilder {
+    ) -> (PtyCommandBuilder, String) {
         self.inner.terminal_pty_command(cwd, envs)
     }
 

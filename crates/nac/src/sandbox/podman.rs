@@ -27,11 +27,38 @@ status=$?
 rm -f "$pidfile"
 exit "$status""#;
 
+const SANDBOX_PTY_WRAPPER: &str = r#"pidfile=$1
+printf '%s' "$$" > "$pidfile"
+bash -i
+status=$?
+rm -f "$pidfile"
+exit "$status""#;
+
 const SANDBOX_KILL_WRAPPER: &str = r#"pidfile=$1
 pid=$(cat "$pidfile" 2>/dev/null) || exit 0
 if [ -n "$pid" ]; then
+  descendants() {
+    parent=$1
+    for stat in /proc/[0-9]*/stat; do
+      [ -r "$stat" ] || continue
+      child=${stat#/proc/}
+      child=${child%/stat}
+      rest=$(sed 's/^.*) //' "$stat" 2>/dev/null) || continue
+      set -- $rest
+      [ "${2:-}" = "$parent" ] || continue
+      printf '%s\n' "$child"
+      descendants "$child"
+    done
+  }
+  pids=$(descendants "$pid")
+  for child in $pids; do
+    kill -TERM "$child" 2>/dev/null || true
+  done
   kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   sleep 0.5
+  for child in $pids; do
+    kill -KILL "$child" 2>/dev/null || true
+  done
   kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
 fi
 rm -f "$pidfile""#;
@@ -166,10 +193,17 @@ impl PodmanSession {
         &self,
         cwd: Option<&Path>,
         envs: &[(String, String)],
-    ) -> PtyCommandBuilder {
+    ) -> (PtyCommandBuilder, String) {
+        let pidfile = make_sandbox_pidfile();
+        let pty_args = vec![
+            "-lc".to_string(),
+            SANDBOX_PTY_WRAPPER.to_string(),
+            "nac-pty".to_string(),
+            pidfile.clone(),
+        ];
         let mut cmd = PtyCommandBuilder::new("podman");
-        cmd.args(self.exec_args("bash", &[], true, true, cwd, envs));
-        cmd
+        cmd.args(self.exec_args("bash", &pty_args, true, true, cwd, envs));
+        (cmd, pidfile)
     }
 
     pub(crate) fn terminal_pipe_command(
@@ -625,7 +659,12 @@ mod tests {
             SANDBOX_EXEC_WRAPPER.contains("printf '%s' \"$pid\" > \"$pidfile\""),
             "exec wrapper: {SANDBOX_EXEC_WRAPPER}"
         );
+        assert!(SANDBOX_PTY_WRAPPER.contains("printf '%s' \"$$\" > \"$pidfile\""));
+        assert!(SANDBOX_PTY_WRAPPER.contains("bash -i"));
+        assert!(SANDBOX_KILL_WRAPPER.contains("descendants()"));
+        assert!(SANDBOX_KILL_WRAPPER.contains("kill -TERM \"$child\""));
         assert!(SANDBOX_KILL_WRAPPER.contains("kill -TERM \"-$pid\""));
+        assert!(SANDBOX_KILL_WRAPPER.contains("kill -KILL \"$child\""));
         assert!(SANDBOX_KILL_WRAPPER.contains("kill -KILL \"-$pid\""));
     }
 }
