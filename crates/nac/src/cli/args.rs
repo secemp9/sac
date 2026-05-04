@@ -17,7 +17,7 @@ pub(super) struct RunCli {
     #[arg(short = 'C', long)]
     pub(super) directory: Option<PathBuf>,
 
-    /// Run orchestrator prompt and exit (no REPL)
+    /// Run orchestrator prompt and exit without launching the TUI
     #[arg(long)]
     pub(super) single: bool,
 

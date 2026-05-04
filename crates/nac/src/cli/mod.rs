@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -23,13 +23,13 @@ use crate::types::Message;
 
 mod args;
 mod config;
-mod repl;
+mod non_tui;
 mod resume;
 mod sandbox;
 
 use args::*;
 use config::*;
-use repl::*;
+use non_tui::*;
 use resume::*;
 use sandbox::*;
 
@@ -46,7 +46,7 @@ pub async fn run() -> Result<()> {
 
     loop {
         let use_tui = run_state.run_config.mode == AgentMode::Orchestrator
-            && run_state.run_config.continue_repl
+            && run_state.run_config.continue_interactive
             && run_state.run_config.managed_worker.is_none()
             && io::stdin().is_terminal()
             && io::stdout().is_terminal()
@@ -228,7 +228,7 @@ async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
                 mode: AgentMode::Worker,
                 agent,
                 initial_prompt: Some(action.clone()),
-                continue_repl: false,
+                continue_interactive: false,
                 managed_worker: Some(ManagedWorkerConfig {
                     store_path,
                     session_id,
@@ -277,7 +277,7 @@ async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
             mode: AgentMode::Worker,
             agent,
             initial_prompt: standalone_prompt.clone(),
-            continue_repl: standalone_prompt.is_none(),
+            continue_interactive: standalone_prompt.is_none(),
             managed_worker: None,
             client,
             session_id: None,
@@ -337,7 +337,7 @@ async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
         mode: AgentMode::Orchestrator,
         agent,
         initial_prompt: cli.prompt,
-        continue_repl: !cli.single,
+        continue_interactive: !cli.single,
         managed_worker: None,
         client,
         session_id: Some(session_id),

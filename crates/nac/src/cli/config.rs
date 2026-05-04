@@ -11,7 +11,7 @@ pub(super) struct RunConfig {
     pub(super) mode: AgentMode,
     pub(super) agent: Agent,
     pub(super) initial_prompt: Option<String>,
-    pub(super) continue_repl: bool,
+    pub(super) continue_interactive: bool,
     pub(super) managed_worker: Option<ManagedWorkerConfig>,
     pub(super) client: ModelClient,
     pub(super) session_id: Option<String>,
