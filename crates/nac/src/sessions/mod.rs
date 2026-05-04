@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::api::{detect_backend, BackendKind, ReasoningEffort};
+use crate::model::{detect_backend, BackendKind, ReasoningEffort};
 use crate::paths::nac_sessions_path;
 use crate::sandbox::SandboxSpec;
 use crate::types::Message;

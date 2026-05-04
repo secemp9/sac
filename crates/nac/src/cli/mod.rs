@@ -8,9 +8,9 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, AgentConfig, AgentMode};
 use crate::agents_md::AgentsMdBundle;
-use crate::api::{BackendKind, ClientOverrides, ModelClient, ReasoningEffort};
 use crate::events::EventSink;
 use crate::mcp::McpRegistry;
+use crate::model::{BackendKind, ClientOverrides, ModelClient, ReasoningEffort};
 use crate::sandbox::{
     build_sandbox_spec, parse_mount_spec, SandboxSession, DEFAULT_SANDBOX_IMAGE,
     DEFAULT_SANDBOX_WORKDIR,

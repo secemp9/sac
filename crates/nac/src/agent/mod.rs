@@ -6,9 +6,9 @@ use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use crate::api::ModelClient;
 use crate::events::{AgentEvent, EventSink};
 use crate::mcp::McpRegistry;
+use crate::model::ModelClient;
 use crate::sandbox::SandboxSession;
 use crate::skills::SkillRegistry;
 use crate::tools::{self, ToolResult, ToolRuntime};
