@@ -23,13 +23,13 @@ use crate::types::Message;
 
 mod args;
 mod config;
-mod non_tui;
+mod managed_worker;
 mod resume;
 mod sandbox;
 
 use args::*;
 use config::*;
-use non_tui::*;
+use managed_worker::*;
 use resume::*;
 use sandbox::*;
 
@@ -42,115 +42,96 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    let terminal_available =
+        io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal();
+    if !matches!(cli, ParsedCli::ManagedWorker(_)) && !terminal_available {
+        if matches!(&cli, ParsedCli::Run(run_cli) if run_cli.resume) {
+            anyhow::bail!("--resume requires an interactive terminal");
+        }
+        anyhow::bail!("interactive mode requires the TUI; run nac from a terminal");
+    }
+
     let mut run_state = build_run_state(cli).await?;
 
     loop {
-        let use_tui = run_state.run_config.mode == AgentMode::Orchestrator
-            && run_state.run_config.continue_interactive
-            && run_state.run_config.managed_worker.is_none()
-            && io::stdin().is_terminal()
-            && io::stdout().is_terminal()
-            && io::stderr().is_terminal();
+        match run_state {
+            RunState::ManagedWorker(run_config) => {
+                run_managed_worker(run_config).await?;
+                return Ok(());
+            }
+            RunState::Orchestrator {
+                run_config,
+                start_in_session_picker,
+            } => {
+                let store_path = run_config.session.store_path();
+                let session_id = run_config.session.session_id().map(str::to_string);
+                let restored_messages = run_config.agent.messages.clone();
+                let session_snapshot = run_config.session.into_snapshot();
+                let agent = run_config.agent;
+                let client = run_config.client;
+                let metadata = TuiMetadata {
+                    cwd: run_config.workspace_display,
+                    workspace_host_path: run_config.workspace_host_path,
+                    store_path,
+                    model: client.model.clone(),
+                    base_url: client.base_url().to_string(),
+                    backend: client.backend().as_str().to_string(),
+                    reasoning_effort: if client.backend() == BackendKind::OpenAiResponses {
+                        client
+                            .reasoning_effort()
+                            .map(|effort| effort.as_str().to_string())
+                    } else {
+                        None
+                    },
+                    session_id,
+                    sandbox_status: run_config.sandbox_status,
+                    agents_md_status: run_config.agents_md_status,
+                };
 
-        if use_tui {
-            let session_snapshot = run_state.run_config.session_snapshot.clone();
-            let restored_messages = run_state.run_config.agent.messages.clone();
-            let initial_prompt = run_state.run_config.initial_prompt.clone();
-            let metadata = TuiMetadata {
-                cwd: run_state.run_config.workspace_display.clone(),
-                workspace_host_path: run_state.run_config.workspace_host_path.clone(),
-                store_path: session_snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.store_path.clone())
-                    .unwrap_or_else(store::default_store_path),
-                model: run_state.run_config.client.model.clone(),
-                base_url: run_state.run_config.client.base_url().to_string(),
-                backend: run_state.run_config.client.backend().as_str().to_string(),
-                reasoning_effort: if run_state.run_config.client.backend()
-                    == BackendKind::OpenAiResponses
+                match tui::run(
+                    agent,
+                    metadata,
+                    restored_messages,
+                    session_snapshot,
+                    start_in_session_picker,
+                )
+                .await?
                 {
-                    run_state
-                        .run_config
-                        .client
-                        .reasoning_effort()
-                        .map(|effort| effort.as_str().to_string())
-                } else {
-                    None
-                },
-                session_id: run_state.run_config.session_id.clone(),
-                sandbox_status: run_state.run_config.sandbox_status.clone(),
-                agents_md_status: run_state.run_config.agents_md_status.clone(),
-            };
-
-            match tui::run(
-                run_state.run_config.agent,
-                initial_prompt,
-                metadata,
-                restored_messages,
-                session_snapshot,
-                run_state.start_in_session_picker,
-            )
-            .await?
-            {
-                TuiOutcome::Exit => return Ok(()),
-                TuiOutcome::ResumeSession(session_id) => {
-                    run_state = RunState {
-                        run_config: build_resume_config_for_session(&session_id).await?,
-                        start_in_session_picker: false,
-                    };
-                    continue;
+                    TuiOutcome::Exit => return Ok(()),
+                    TuiOutcome::ResumeSession(session_id) => {
+                        run_state = RunState::Orchestrator {
+                            run_config: build_resume_config_for_session(&session_id).await?,
+                            start_in_session_picker: false,
+                        };
+                        continue;
+                    }
                 }
             }
         }
-
-        if run_state.start_in_session_picker {
-            anyhow::bail!("--resume requires an interactive terminal");
-        }
-
-        run_non_tui(run_state.run_config).await?;
-        return Ok(());
     }
 }
 
 async fn build_run_state(cli: ParsedCli) -> Result<RunState> {
     match cli {
-        ParsedCli::Run(cli) if cli.resume => {
-            if cli.worker || cli.session_id.is_some() {
-                anyhow::bail!("--resume cannot be combined with workers or session ids");
-            }
-            Ok(RunState {
-                run_config: build_resume_picker_config(cli).await?,
-                start_in_session_picker: true,
-            })
-        }
-        ParsedCli::Run(cli) => Ok(RunState {
+        ParsedCli::Run(cli) if cli.resume => Ok(RunState::Orchestrator {
+            run_config: build_resume_picker_config(cli).await?,
+            start_in_session_picker: true,
+        }),
+        ParsedCli::Run(cli) => Ok(RunState::Orchestrator {
             run_config: build_run_cli_config(cli).await?,
             start_in_session_picker: false,
         }),
-        ParsedCli::Resume(cli) => Ok(RunState {
+        ParsedCli::ManagedWorker(cli) => Ok(RunState::ManagedWorker(
+            build_managed_worker_config(cli).await?,
+        )),
+        ParsedCli::Resume(cli) => Ok(RunState::Orchestrator {
             run_config: build_resume_config(cli).await?,
             start_in_session_picker: false,
         }),
     }
 }
 
-async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
-    let managed_worker =
-        cli.worker && cli.session_id.is_some() && cli.thread_name.is_some() && cli.action.is_some();
-
-    if cli.worker && !managed_worker {
-        anyhow::bail!("--worker is internal and only supports managed thread dispatches");
-    }
-
-    if !cli.worker
-        && (cli.session_id.is_some()
-            || cli.thread_name.is_some()
-            || cli.action.is_some()
-            || !cli.source_threads.is_empty())
-    {
-        anyhow::bail!("worker dispatch flags are only valid with --worker");
-    }
-
+async fn build_run_cli_config(cli: RunCli) -> Result<OrchestratorRunConfig> {
     let client = ModelClient::from_env_with_overrides(ClientOverrides {
         base_url: cli.api_base_url.clone(),
         model: cli.api_model.clone(),
@@ -161,7 +142,6 @@ async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
     let sandbox = build_sandbox_session(&cli, &current_dir).await?;
     let agents_md_workspace_dir = effective_agents_md_workspace_dir(&current_dir, sandbox.as_ref());
     let agents_md = AgentsMdBundle::load(agents_md_workspace_dir.as_deref())?;
-    let skills_workspace_dir = effective_skills_workspace_dir(&current_dir, sandbox.as_ref());
     let working_directory = sandbox
         .as_ref()
         .map(|session| session.workdir_display())
@@ -177,73 +157,6 @@ async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
         .unwrap_or_else(|| "off".to_string());
     let agents_md_message = agents_md.system_message();
     let agents_md_status = agents_md.status_text();
-
-    if cli.worker {
-        let session_id = cli
-            .session_id
-            .expect("managed worker validation requires session_id");
-        let thread_name = cli
-            .thread_name
-            .expect("managed worker validation requires thread_name");
-        let action = cli
-            .action
-            .expect("managed worker validation requires action");
-        let store_path = absolute_store_path(
-            &current_dir,
-            cli.store_path.unwrap_or_else(store::default_store_path),
-        );
-        let mcp = McpRegistry::load(&current_dir, sandbox.as_ref()).await?;
-        let skills = SkillRegistry::load(skills_workspace_dir.as_deref(), sandbox.as_ref())?;
-        let extra_tool_defs = mcp
-            .as_ref()
-            .map(|registry| registry.tool_definitions())
-            .unwrap_or_default();
-
-        store::initialize(&store_path)?;
-        let worker_context = store::load_worker_context(
-            &store_path,
-            &session_id,
-            &thread_name,
-            &cli.source_threads,
-        )?;
-        let agent = Agent::with_config(
-            client.clone(),
-            AgentConfig {
-                mode: AgentMode::Worker,
-                store_path: store_path.clone(),
-                session_id: Some(session_id.clone()),
-                initial_messages: build_worker_context_messages(&thread_name, &worker_context),
-                thread_name: Some(thread_name.clone()),
-                event_sink: EventSink::stderr_prefixed(),
-                working_directory: working_directory.clone(),
-                sandbox: sandbox.clone(),
-                mcp,
-                skills,
-                extra_tool_defs,
-                agents_md_message: agents_md_message.clone(),
-            },
-        );
-
-        return Ok(RunConfig {
-            mode: AgentMode::Worker,
-            agent,
-            initial_prompt: Some(action.clone()),
-            continue_interactive: false,
-            managed_worker: Some(ManagedWorkerConfig {
-                store_path,
-                session_id,
-                thread_name,
-                action,
-            }),
-            client,
-            session_id: None,
-            session_snapshot: None,
-            sandbox_status,
-            agents_md_status,
-            workspace_display: working_directory.clone(),
-            workspace_host_path: workspace_host_path.clone(),
-        });
-    }
 
     let store_path = absolute_store_path(
         &current_dir,
@@ -281,19 +194,79 @@ async fn build_run_cli_config(cli: RunCli) -> Result<RunConfig> {
     );
     sessions::create_session(&session_snapshot)?;
 
-    Ok(RunConfig {
-        mode: AgentMode::Orchestrator,
+    Ok(OrchestratorRunConfig {
         agent,
-        initial_prompt: None,
-        continue_interactive: true,
-        managed_worker: None,
         client,
-        session_id: Some(session_id),
-        session_snapshot: Some(session_snapshot),
+        session: OrchestratorSession::Active {
+            session_id,
+            snapshot: session_snapshot,
+        },
         sandbox_status,
         agents_md_status,
         workspace_display: working_directory,
         workspace_host_path,
+    })
+}
+
+async fn build_managed_worker_config(cli: ManagedWorkerCli) -> Result<ManagedWorkerRunConfig> {
+    let client = ModelClient::from_env_with_overrides(ClientOverrides {
+        base_url: cli.api_base_url.clone(),
+        model: cli.api_model.clone(),
+        backend: Some(cli.backend),
+        reasoning_effort: cli.reasoning_effort,
+    })?;
+    let current_dir = std::env::current_dir()?;
+    let sandbox = build_sandbox_session(&cli, &current_dir).await?;
+    let agents_md_workspace_dir = effective_agents_md_workspace_dir(&current_dir, sandbox.as_ref());
+    let agents_md = AgentsMdBundle::load(agents_md_workspace_dir.as_deref())?;
+    let skills_workspace_dir = effective_skills_workspace_dir(&current_dir, sandbox.as_ref());
+    let working_directory = sandbox
+        .as_ref()
+        .map(|session| session.workdir_display())
+        .unwrap_or_else(current_directory_display);
+    let agents_md_message = agents_md.system_message();
+    let store_path = absolute_store_path(
+        &current_dir,
+        cli.store_path.unwrap_or_else(store::default_store_path),
+    );
+    let mcp = McpRegistry::load(&current_dir, sandbox.as_ref()).await?;
+    let skills = SkillRegistry::load(skills_workspace_dir.as_deref(), sandbox.as_ref())?;
+    let extra_tool_defs = mcp
+        .as_ref()
+        .map(|registry| registry.tool_definitions())
+        .unwrap_or_default();
+
+    store::initialize(&store_path)?;
+    let worker_context = store::load_worker_context(
+        &store_path,
+        &cli.session_id,
+        &cli.thread_name,
+        &cli.source_threads,
+    )?;
+    let agent = Agent::with_config(
+        client.clone(),
+        AgentConfig {
+            mode: AgentMode::Worker,
+            store_path: store_path.clone(),
+            session_id: Some(cli.session_id.clone()),
+            initial_messages: build_worker_context_messages(&cli.thread_name, &worker_context),
+            thread_name: Some(cli.thread_name.clone()),
+            event_sink: EventSink::stderr_prefixed(),
+            working_directory,
+            sandbox,
+            mcp,
+            skills,
+            extra_tool_defs,
+            agents_md_message,
+        },
+    );
+
+    Ok(ManagedWorkerRunConfig {
+        agent,
+        store_path,
+        session_id: cli.session_id,
+        thread_name: cli.thread_name,
+        action: cli.action,
     })
 }
 
@@ -381,6 +354,7 @@ mod tests {
                 assert_eq!(resume.session_id.as_deref(), Some("session-123"))
             }
             ParsedCli::Run(_) => panic!("expected resume cli"),
+            ParsedCli::ManagedWorker(_) => panic!("expected resume cli"),
         }
     }
 
@@ -390,6 +364,32 @@ mod tests {
         match parsed {
             ParsedCli::Run(run) => assert!(run.resume),
             ParsedCli::Resume(_) => panic!("expected run cli"),
+            ParsedCli::ManagedWorker(_) => panic!("expected run cli"),
+        }
+    }
+
+    #[test]
+    fn parse_hidden_worker_command_uses_managed_worker_cli() {
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("__worker"),
+            OsString::from("--session-id"),
+            OsString::from("session-123"),
+            OsString::from("--thread-name"),
+            OsString::from("impl"),
+            OsString::from("--action"),
+            OsString::from("do work"),
+            OsString::from("--source-thread"),
+            OsString::from("research"),
+        ]);
+        match parsed {
+            ParsedCli::ManagedWorker(worker) => {
+                assert_eq!(worker.session_id, "session-123");
+                assert_eq!(worker.thread_name, "impl");
+                assert_eq!(worker.action, "do work");
+                assert_eq!(worker.source_threads, vec!["research"]);
+            }
+            ParsedCli::Run(_) | ParsedCli::Resume(_) => panic!("expected managed worker cli"),
         }
     }
 
@@ -431,13 +431,10 @@ mod tests {
         )
         .unwrap();
 
-        let cli = RunCli {
-            resume: false,
-            directory: None,
-            worker: true,
-            session_id: Some(session_id.to_string()),
-            thread_name: Some("impl".to_string()),
-            action: Some("implement the next step".to_string()),
+        let cli = ManagedWorkerCli {
+            session_id: session_id.to_string(),
+            thread_name: "impl".to_string(),
+            action: "implement the next step".to_string(),
             source_threads: vec!["auth".to_string(), "tests".to_string()],
             store_path: Some(store_path.clone()),
             sandbox: false,
@@ -455,13 +452,9 @@ mod tests {
             api_model: None,
         };
 
-        let run_config = build_run_cli_config(cli).await.unwrap();
+        let run_config = build_managed_worker_config(cli).await.unwrap();
 
-        assert_eq!(
-            run_config.initial_prompt.as_deref(),
-            Some("implement the next step")
-        );
-        assert!(run_config.managed_worker.is_some());
+        assert_eq!(run_config.action, "implement the next step");
         assert_eq!(run_config.agent.messages.len(), 4);
 
         match &run_config.agent.messages[1] {
@@ -506,58 +499,6 @@ mod tests {
             normalize_gpu_device("nvidia.com/gpu=mig1:0"),
             "nvidia.com/gpu=mig1:0"
         );
-    }
-
-    #[tokio::test]
-    async fn standalone_worker_is_rejected_before_client_setup() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
-
-        let original_api_key = std::env::var("OPENAI_API_KEY").ok();
-        unsafe {
-            std::env::remove_var("OPENAI_API_KEY");
-        }
-        let cli = RunCli {
-            resume: false,
-            directory: None,
-            worker: true,
-            session_id: None,
-            thread_name: None,
-            action: None,
-            source_threads: Vec::new(),
-            store_path: None,
-            sandbox: false,
-            backend: BackendKind::Auto,
-            reasoning_effort: None,
-            no_mount_cwd: false,
-            mounts: Vec::new(),
-            mounts_ro: Vec::new(),
-            sandbox_image: DEFAULT_SANDBOX_IMAGE.to_string(),
-            sandbox_gpus: Vec::new(),
-            sandbox_shm_size: None,
-            sandbox_session_key: None,
-            sandbox_workdir: None,
-            api_base_url: None,
-            api_model: None,
-        };
-
-        let error = match build_run_cli_config(cli).await {
-            Ok(_) => panic!("standalone worker should be rejected"),
-            Err(error) => error.to_string(),
-        };
-        assert_eq!(
-            error,
-            "--worker is internal and only supports managed thread dispatches"
-        );
-
-        if let Some(key) = original_api_key {
-            unsafe {
-                std::env::set_var("OPENAI_API_KEY", key);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("OPENAI_API_KEY");
-            }
-        }
     }
 
     #[tokio::test]
@@ -622,7 +563,7 @@ mod tests {
             session_cwd.canonicalize().unwrap(),
             "resume should restore the stored cwd"
         );
-        assert_eq!(run_config.session_id.as_deref(), Some("resume-session"));
+        assert_eq!(run_config.session.session_id(), Some("resume-session"));
         assert_eq!(run_config.agent.messages.len(), 3);
         match &run_config.agent.messages[1] {
             Message::User { content } => assert_eq!(content, "hello"),

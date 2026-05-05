@@ -139,7 +139,6 @@ pub enum TuiOutcome {
 
 pub async fn run(
     mut agent: Agent,
-    initial_prompt: Option<String>,
     metadata: TuiMetadata,
     restored_messages: Vec<Message>,
     mut session_snapshot: Option<SessionSnapshot>,
@@ -172,10 +171,6 @@ pub async fn run(
     let mut animation_tick = time::interval(Duration::from_millis(75));
     animation_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     terminal.draw(|frame| app.render(frame))?;
-
-    if let Some(prompt) = initial_prompt {
-        submit_prompt(prompt, agent.clone(), &mut app, &mut terminal)?;
-    }
 
     let mut outcome = TuiOutcome::Exit;
 

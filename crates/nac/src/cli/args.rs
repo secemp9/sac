@@ -15,26 +15,6 @@ pub(super) struct RunCli {
     #[arg(short = 'C', long)]
     pub(super) directory: Option<PathBuf>,
 
-    /// Internal: run as a managed worker subprocess
-    #[arg(long, hide = true)]
-    pub(super) worker: bool,
-
-    /// Internal: session id for an orchestrator session or managed worker dispatch
-    #[arg(long, hide = true)]
-    pub(super) session_id: Option<String>,
-
-    /// Internal: thread name for a managed worker dispatch
-    #[arg(long, hide = true)]
-    pub(super) thread_name: Option<String>,
-
-    /// Internal: action for a managed worker dispatch
-    #[arg(long, hide = true)]
-    pub(super) action: Option<String>,
-
-    /// Internal: source threads whose latest retained episodes should be loaded
-    #[arg(long = "source-thread", hide = true)]
-    pub(super) source_threads: Vec<String>,
-
     /// Override the SQLite store path (default: .nac/store.db)
     #[arg(long)]
     pub(super) store_path: Option<PathBuf>,
@@ -93,6 +73,86 @@ pub(super) struct RunCli {
 }
 
 #[derive(Parser)]
+#[command(
+    name = "nac __worker",
+    about = "internal managed worker dispatch",
+    hide = true
+)]
+pub(super) struct ManagedWorkerCli {
+    /// Session id for the managed worker dispatch
+    #[arg(long)]
+    pub(super) session_id: String,
+
+    /// Thread name for the managed worker dispatch
+    #[arg(long)]
+    pub(super) thread_name: String,
+
+    /// Action for the managed worker dispatch
+    #[arg(long)]
+    pub(super) action: String,
+
+    /// Source threads whose latest retained episodes should be loaded
+    #[arg(long = "source-thread")]
+    pub(super) source_threads: Vec<String>,
+
+    /// Override the SQLite store path (default: .nac/store.db)
+    #[arg(long)]
+    pub(super) store_path: Option<PathBuf>,
+
+    /// Run tool execution inside a session-scoped Podman sandbox
+    #[arg(long)]
+    pub(super) sandbox: bool,
+
+    /// Backend wire shape to use for model requests
+    #[arg(long, value_enum, default_value_t = BackendKind::Auto)]
+    pub(super) backend: BackendKind,
+
+    /// Reasoning effort to request when supported by the selected backend
+    #[arg(long = "effort", value_enum)]
+    pub(super) reasoning_effort: Option<ReasoningEffort>,
+
+    /// Disable the implicit current-directory mount into /workspace
+    #[arg(long)]
+    pub(super) no_mount_cwd: bool,
+
+    /// Additional read-write mount in the form HOST:GUEST
+    #[arg(long = "mount")]
+    pub(super) mounts: Vec<String>,
+
+    /// Additional read-only mount in the form HOST:GUEST
+    #[arg(long = "mount-ro")]
+    pub(super) mounts_ro: Vec<String>,
+
+    /// Sandbox image to use when --sandbox is enabled
+    #[arg(long, default_value = DEFAULT_SANDBOX_IMAGE)]
+    pub(super) sandbox_image: String,
+
+    /// GPU CDI device to expose to the sandbox
+    #[arg(long = "sandbox-gpu")]
+    pub(super) sandbox_gpus: Vec<String>,
+
+    /// Sandbox /dev/shm size
+    #[arg(long = "sandbox-shm-size")]
+    pub(super) sandbox_shm_size: Option<String>,
+
+    /// Internal sandbox session key used to attach worker subprocesses
+    #[arg(long)]
+    pub(super) sandbox_session_key: Option<String>,
+
+    /// Internal sandbox workdir used for worker subprocesses
+    #[arg(long)]
+    pub(super) sandbox_workdir: Option<String>,
+
+    /// Internal API base URL override used by managed workers
+    #[arg(long)]
+    pub(super) api_base_url: Option<String>,
+
+    /// Internal model override used by managed workers
+    #[arg(long)]
+    pub(super) api_model: Option<String>,
+}
+
+#[derive(Parser)]
 #[command(name = "nac resume", about = "resume a saved nac session")]
 pub(super) struct ResumeCli {
     /// Session id to resume (default: most recently updated session)
@@ -105,6 +165,7 @@ pub(super) struct ResumeCli {
 
 pub(super) enum ParsedCli {
     Run(RunCli),
+    ManagedWorker(ManagedWorkerCli),
     Resume(ResumeCli),
 }
 
@@ -122,6 +183,14 @@ pub(super) fn parse_cli_from(args: Vec<OsString>) -> ParsedCli {
         resume_args.push(args[0].clone());
         resume_args.extend(args.into_iter().skip(2));
         ParsedCli::Resume(ResumeCli::parse_from(resume_args))
+    } else if args
+        .get(1)
+        .is_some_and(|value| value == OsStr::new("__worker"))
+    {
+        let mut worker_args = Vec::with_capacity(args.len().saturating_sub(1));
+        worker_args.push(args[0].clone());
+        worker_args.extend(args.into_iter().skip(2));
+        ParsedCli::ManagedWorker(ManagedWorkerCli::parse_from(worker_args))
     } else {
         ParsedCli::Run(RunCli::parse_from(args))
     }

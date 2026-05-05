@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn build_resume_picker_config(cli: RunCli) -> Result<RunConfig> {
+pub(super) async fn build_resume_picker_config(cli: RunCli) -> Result<OrchestratorRunConfig> {
     let client = ModelClient::from_env_with_overrides(ClientOverrides {
         base_url: cli.api_base_url,
         model: cli.api_model,
@@ -22,7 +22,7 @@ pub(super) async fn build_resume_picker_config(cli: RunCli) -> Result<RunConfig>
         client.clone(),
         AgentConfig {
             mode: AgentMode::Orchestrator,
-            store_path,
+            store_path: store_path.clone(),
             session_id: None,
             initial_messages: Vec::new(),
             thread_name: None,
@@ -36,15 +36,10 @@ pub(super) async fn build_resume_picker_config(cli: RunCli) -> Result<RunConfig>
         },
     );
 
-    Ok(RunConfig {
-        mode: AgentMode::Orchestrator,
+    Ok(OrchestratorRunConfig {
         agent,
-        initial_prompt: None,
-        continue_interactive: true,
-        managed_worker: None,
         client,
-        session_id: None,
-        session_snapshot: None,
+        session: OrchestratorSession::Picker { store_path },
         sandbox_status,
         agents_md_status,
         workspace_display: working_directory,
@@ -52,7 +47,7 @@ pub(super) async fn build_resume_picker_config(cli: RunCli) -> Result<RunConfig>
     })
 }
 
-pub(super) async fn build_resume_config(cli: ResumeCli) -> Result<RunConfig> {
+pub(super) async fn build_resume_config(cli: ResumeCli) -> Result<OrchestratorRunConfig> {
     if cli.last && cli.session_id.is_some() {
         anyhow::bail!("resume accepts either a session id or --last, not both");
     }
@@ -112,15 +107,14 @@ pub(super) async fn build_resume_config(cli: ResumeCli) -> Result<RunConfig> {
     );
     agent.restore_messages(snapshot.messages.clone());
 
-    Ok(RunConfig {
-        mode: AgentMode::Orchestrator,
+    let session_id = snapshot.session_id.clone();
+    Ok(OrchestratorRunConfig {
         agent,
-        initial_prompt: None,
-        continue_interactive: true,
-        managed_worker: None,
         client,
-        session_id: Some(snapshot.session_id.clone()),
-        session_snapshot: Some(snapshot),
+        session: OrchestratorSession::Active {
+            session_id,
+            snapshot,
+        },
         sandbox_status,
         agents_md_status,
         workspace_display: working_directory,
@@ -128,7 +122,9 @@ pub(super) async fn build_resume_config(cli: ResumeCli) -> Result<RunConfig> {
     })
 }
 
-pub(super) async fn build_resume_config_for_session(session_id: &str) -> Result<RunConfig> {
+pub(super) async fn build_resume_config_for_session(
+    session_id: &str,
+) -> Result<OrchestratorRunConfig> {
     build_resume_config(ResumeCli {
         session_id: Some(session_id.to_string()),
         last: false,
