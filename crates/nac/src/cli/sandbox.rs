@@ -12,45 +12,7 @@ pub(super) trait SandboxCliArgs {
     fn sandbox_workdir(&self) -> Option<&String>;
 }
 
-impl SandboxCliArgs for RunCli {
-    fn sandbox_enabled(&self) -> bool {
-        self.sandbox
-    }
-
-    fn no_mount_cwd(&self) -> bool {
-        self.no_mount_cwd
-    }
-
-    fn mounts(&self) -> &[String] {
-        &self.mounts
-    }
-
-    fn mounts_ro(&self) -> &[String] {
-        &self.mounts_ro
-    }
-
-    fn sandbox_image(&self) -> &str {
-        &self.sandbox_image
-    }
-
-    fn sandbox_gpus(&self) -> &[String] {
-        &self.sandbox_gpus
-    }
-
-    fn sandbox_shm_size(&self) -> Option<&String> {
-        self.sandbox_shm_size.as_ref()
-    }
-
-    fn sandbox_session_key(&self) -> Option<&String> {
-        self.sandbox_session_key.as_ref()
-    }
-
-    fn sandbox_workdir(&self) -> Option<&String> {
-        self.sandbox_workdir.as_ref()
-    }
-}
-
-impl SandboxCliArgs for ManagedWorkerCli {
+impl SandboxCliArgs for SandboxArgs {
     fn sandbox_enabled(&self) -> bool {
         self.sandbox
     }

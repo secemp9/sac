@@ -1,12 +1,10 @@
 use super::*;
 
-pub(super) async fn build_resume_picker_config(cli: RunCli) -> Result<OrchestratorRunConfig> {
-    let client = ModelClient::from_env_with_overrides(ClientOverrides {
-        base_url: cli.api_base_url,
-        model: cli.api_model,
-        backend: Some(cli.backend),
-        reasoning_effort: cli.reasoning_effort,
-    })?;
+pub(super) async fn build_resume_picker_config(cli: ResumeCli) -> Result<OrchestratorRunConfig> {
+    if let Some(dir) = cli.directory.as_ref() {
+        std::env::set_current_dir(dir)?;
+    }
+    let client = ModelClient::from_env()?;
     let current_dir = std::env::current_dir()?;
     let agents_md = AgentsMdBundle::load(Some(&current_dir))?;
     let working_directory = current_directory_display();
@@ -15,7 +13,9 @@ pub(super) async fn build_resume_picker_config(cli: RunCli) -> Result<Orchestrat
     let agents_md_status = agents_md.status_text();
     let store_path = absolute_store_path(
         &current_dir,
-        cli.store_path.unwrap_or_else(store::default_store_path),
+        cli.store
+            .store_path
+            .unwrap_or_else(store::default_store_path),
     );
     store::initialize(&store_path)?;
     let agent = Agent::with_config(
@@ -52,12 +52,37 @@ pub(super) async fn build_resume_config(cli: ResumeCli) -> Result<OrchestratorRu
         anyhow::bail!("resume accepts either a session id or --last, not both");
     }
 
+    if let Some(dir) = cli.directory.as_ref() {
+        std::env::set_current_dir(dir)?;
+    }
+    let resume_dir = std::env::current_dir()?;
+    let resume_store_path = absolute_store_path(
+        &resume_dir,
+        cli.store
+            .store_path
+            .unwrap_or_else(store::default_store_path),
+    );
+
     let snapshot = match (cli.session_id.as_deref(), cli.last) {
-        (Some(session_id), false) => sessions::load_session(session_id)?,
+        (Some(session_id), false) => sessions::load_session(&resume_store_path, session_id)?,
         (Some(_), true) => unreachable!(),
-        (None, _) => sessions::load_last_session()?,
+        (None, _) => sessions::load_last_session(&resume_store_path)?,
     };
 
+    build_resume_config_from_snapshot(snapshot).await
+}
+
+pub(super) async fn build_resume_config_for_session(
+    store_path: PathBuf,
+    session_id: &str,
+) -> Result<OrchestratorRunConfig> {
+    let snapshot = sessions::load_session(&store_path, session_id)?;
+    build_resume_config_from_snapshot(snapshot).await
+}
+
+async fn build_resume_config_from_snapshot(
+    snapshot: SessionSnapshot,
+) -> Result<OrchestratorRunConfig> {
     std::env::set_current_dir(&snapshot.cwd)?;
     let current_dir = std::env::current_dir()?;
     let client = ModelClient::from_env_with_overrides(ClientOverrides {
@@ -120,14 +145,4 @@ pub(super) async fn build_resume_config(cli: ResumeCli) -> Result<OrchestratorRu
         workspace_display: working_directory,
         workspace_host_path,
     })
-}
-
-pub(super) async fn build_resume_config_for_session(
-    session_id: &str,
-) -> Result<OrchestratorRunConfig> {
-    build_resume_config(ResumeCli {
-        session_id: Some(session_id.to_string()),
-        last: false,
-    })
-    .await
 }

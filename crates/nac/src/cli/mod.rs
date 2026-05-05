@@ -36,17 +36,26 @@ use sandbox::*;
 pub async fn run() -> Result<()> {
     let cli = parse_cli();
 
-    if let ParsedCli::Run(run_cli) = &cli {
-        if let Some(dir) = run_cli.directory.as_ref() {
-            std::env::set_current_dir(dir)?;
+    match &cli {
+        ParsedCli::Run(run_cli) => {
+            if let Some(dir) = run_cli.directory.as_ref() {
+                std::env::set_current_dir(dir)?;
+            }
         }
+        ParsedCli::Resume(resume_cli) => {
+            if let Some(dir) = resume_cli.directory.as_ref() {
+                std::env::set_current_dir(dir)?;
+            }
+        }
+        ParsedCli::ManagedWorker(_) => {}
     }
 
     let terminal_available =
         io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal();
     if !matches!(cli, ParsedCli::ManagedWorker(_)) && !terminal_available {
-        if matches!(&cli, ParsedCli::Run(run_cli) if run_cli.resume) {
-            anyhow::bail!("--resume requires an interactive terminal");
+        if matches!(&cli, ParsedCli::Resume(resume_cli) if resume_cli.session_id.is_none() && !resume_cli.last)
+        {
+            anyhow::bail!("resume requires an interactive terminal");
         }
         anyhow::bail!("interactive mode requires the TUI; run nac from a terminal");
     }
@@ -72,7 +81,7 @@ pub async fn run() -> Result<()> {
                 let metadata = TuiMetadata {
                     cwd: run_config.workspace_display,
                     workspace_host_path: run_config.workspace_host_path,
-                    store_path,
+                    store_path: store_path.clone(),
                     model: client.model.clone(),
                     base_url: client.base_url().to_string(),
                     backend: client.backend().as_str().to_string(),
@@ -100,7 +109,8 @@ pub async fn run() -> Result<()> {
                     TuiOutcome::Exit => return Ok(()),
                     TuiOutcome::ResumeSession(session_id) => {
                         run_state = RunState::Orchestrator {
-                            run_config: build_resume_config_for_session(&session_id).await?,
+                            run_config: build_resume_config_for_session(store_path, &session_id)
+                                .await?,
                             start_in_session_picker: false,
                         };
                         continue;
@@ -113,10 +123,6 @@ pub async fn run() -> Result<()> {
 
 async fn build_run_state(cli: ParsedCli) -> Result<RunState> {
     match cli {
-        ParsedCli::Run(cli) if cli.resume => Ok(RunState::Orchestrator {
-            run_config: build_resume_picker_config(cli).await?,
-            start_in_session_picker: true,
-        }),
         ParsedCli::Run(cli) => Ok(RunState::Orchestrator {
             run_config: build_run_cli_config(cli).await?,
             start_in_session_picker: false,
@@ -124,6 +130,12 @@ async fn build_run_state(cli: ParsedCli) -> Result<RunState> {
         ParsedCli::ManagedWorker(cli) => Ok(RunState::ManagedWorker(
             build_managed_worker_config(cli).await?,
         )),
+        ParsedCli::Resume(cli) if cli.session_id.is_none() && !cli.last => {
+            Ok(RunState::Orchestrator {
+                run_config: build_resume_picker_config(cli).await?,
+                start_in_session_picker: true,
+            })
+        }
         ParsedCli::Resume(cli) => Ok(RunState::Orchestrator {
             run_config: build_resume_config(cli).await?,
             start_in_session_picker: false,
@@ -133,13 +145,13 @@ async fn build_run_state(cli: ParsedCli) -> Result<RunState> {
 
 async fn build_run_cli_config(cli: RunCli) -> Result<OrchestratorRunConfig> {
     let client = ModelClient::from_env_with_overrides(ClientOverrides {
-        base_url: cli.api_base_url.clone(),
-        model: cli.api_model.clone(),
-        backend: Some(cli.backend),
-        reasoning_effort: cli.reasoning_effort,
+        base_url: cli.model.api_base_url.clone(),
+        model: cli.model.api_model.clone(),
+        backend: Some(cli.model.backend),
+        reasoning_effort: cli.model.reasoning_effort,
     })?;
     let current_dir = std::env::current_dir()?;
-    let sandbox = build_sandbox_session(&cli, &current_dir).await?;
+    let sandbox = build_sandbox_session(&cli.sandbox, &current_dir).await?;
     let agents_md_workspace_dir = effective_agents_md_workspace_dir(&current_dir, sandbox.as_ref());
     let agents_md = AgentsMdBundle::load(agents_md_workspace_dir.as_deref())?;
     let working_directory = sandbox
@@ -160,7 +172,9 @@ async fn build_run_cli_config(cli: RunCli) -> Result<OrchestratorRunConfig> {
 
     let store_path = absolute_store_path(
         &current_dir,
-        cli.store_path.unwrap_or_else(store::default_store_path),
+        cli.store
+            .store_path
+            .unwrap_or_else(store::default_store_path),
     );
     store::initialize(&store_path)?;
     let session_id = Uuid::new_v4().to_string();
@@ -210,13 +224,13 @@ async fn build_run_cli_config(cli: RunCli) -> Result<OrchestratorRunConfig> {
 
 async fn build_managed_worker_config(cli: ManagedWorkerCli) -> Result<ManagedWorkerRunConfig> {
     let client = ModelClient::from_env_with_overrides(ClientOverrides {
-        base_url: cli.api_base_url.clone(),
-        model: cli.api_model.clone(),
-        backend: Some(cli.backend),
-        reasoning_effort: cli.reasoning_effort,
+        base_url: cli.model.api_base_url.clone(),
+        model: cli.model.api_model.clone(),
+        backend: Some(cli.model.backend),
+        reasoning_effort: cli.model.reasoning_effort,
     })?;
     let current_dir = std::env::current_dir()?;
-    let sandbox = build_sandbox_session(&cli, &current_dir).await?;
+    let sandbox = build_sandbox_session(&cli.sandbox, &current_dir).await?;
     let agents_md_workspace_dir = effective_agents_md_workspace_dir(&current_dir, sandbox.as_ref());
     let agents_md = AgentsMdBundle::load(agents_md_workspace_dir.as_deref())?;
     let skills_workspace_dir = effective_skills_workspace_dir(&current_dir, sandbox.as_ref());
@@ -227,7 +241,9 @@ async fn build_managed_worker_config(cli: ManagedWorkerCli) -> Result<ManagedWor
     let agents_md_message = agents_md.system_message();
     let store_path = absolute_store_path(
         &current_dir,
-        cli.store_path.unwrap_or_else(store::default_store_path),
+        cli.store
+            .store_path
+            .unwrap_or_else(store::default_store_path),
     );
     let mcp = McpRegistry::load(&current_dir, sandbox.as_ref()).await?;
     let skills = SkillRegistry::load(skills_workspace_dir.as_deref(), sandbox.as_ref())?;
@@ -239,18 +255,21 @@ async fn build_managed_worker_config(cli: ManagedWorkerCli) -> Result<ManagedWor
     store::initialize(&store_path)?;
     let worker_context = store::load_worker_context(
         &store_path,
-        &cli.session_id,
-        &cli.thread_name,
-        &cli.source_threads,
+        &cli.dispatch.session_id,
+        &cli.dispatch.thread_name,
+        &cli.dispatch.source_threads,
     )?;
     let agent = Agent::with_config(
         client.clone(),
         AgentConfig {
             mode: AgentMode::Worker,
             store_path: store_path.clone(),
-            session_id: Some(cli.session_id.clone()),
-            initial_messages: build_worker_context_messages(&cli.thread_name, &worker_context),
-            thread_name: Some(cli.thread_name.clone()),
+            session_id: Some(cli.dispatch.session_id.clone()),
+            initial_messages: build_worker_context_messages(
+                &cli.dispatch.thread_name,
+                &worker_context,
+            ),
+            thread_name: Some(cli.dispatch.thread_name.clone()),
             event_sink: EventSink::stderr_prefixed(),
             working_directory,
             sandbox,
@@ -264,9 +283,9 @@ async fn build_managed_worker_config(cli: ManagedWorkerCli) -> Result<ManagedWor
     Ok(ManagedWorkerRunConfig {
         agent,
         store_path,
-        session_id: cli.session_id,
-        thread_name: cli.thread_name,
-        action: cli.action,
+        session_id: cli.dispatch.session_id,
+        thread_name: cli.dispatch.thread_name,
+        action: cli.dispatch.action,
     })
 }
 
@@ -319,6 +338,29 @@ mod tests {
             .join("store.db")
     }
 
+    fn default_model_args() -> ModelArgs {
+        ModelArgs {
+            backend: BackendKind::Auto,
+            reasoning_effort: None,
+            api_base_url: None,
+            api_model: None,
+        }
+    }
+
+    fn default_sandbox_args() -> SandboxArgs {
+        SandboxArgs {
+            sandbox: false,
+            no_mount_cwd: false,
+            mounts: Vec::new(),
+            mounts_ro: Vec::new(),
+            sandbox_image: DEFAULT_SANDBOX_IMAGE.to_string(),
+            sandbox_gpus: Vec::new(),
+            sandbox_shm_size: None,
+            sandbox_session_key: None,
+            sandbox_workdir: None,
+        }
+    }
+
     #[test]
     fn workspace_dir_from_explicit_mount_uses_workspace_guest_mapping() {
         let root = std::env::temp_dir().join(format!(
@@ -359,12 +401,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_resume_flag_uses_run_cli() {
-        let parsed = parse_cli_from(vec![OsString::from("nac"), OsString::from("--resume")]);
+    fn parse_resume_command_without_id_uses_resume_picker_cli() {
+        let parsed = parse_cli_from(vec![OsString::from("nac"), OsString::from("resume")]);
         match parsed {
-            ParsedCli::Run(run) => assert!(run.resume),
-            ParsedCli::Resume(_) => panic!("expected run cli"),
-            ParsedCli::ManagedWorker(_) => panic!("expected run cli"),
+            ParsedCli::Resume(resume) => {
+                assert!(resume.session_id.is_none());
+                assert!(!resume.last);
+            }
+            ParsedCli::Run(_) => panic!("expected resume cli"),
+            ParsedCli::ManagedWorker(_) => panic!("expected resume cli"),
         }
     }
 
@@ -384,10 +429,10 @@ mod tests {
         ]);
         match parsed {
             ParsedCli::ManagedWorker(worker) => {
-                assert_eq!(worker.session_id, "session-123");
-                assert_eq!(worker.thread_name, "impl");
-                assert_eq!(worker.action, "do work");
-                assert_eq!(worker.source_threads, vec!["research"]);
+                assert_eq!(worker.dispatch.session_id, "session-123");
+                assert_eq!(worker.dispatch.thread_name, "impl");
+                assert_eq!(worker.dispatch.action, "do work");
+                assert_eq!(worker.dispatch.source_threads, vec!["research"]);
             }
             ParsedCli::Run(_) | ParsedCli::Resume(_) => panic!("expected managed worker cli"),
         }
@@ -432,24 +477,17 @@ mod tests {
         .unwrap();
 
         let cli = ManagedWorkerCli {
-            session_id: session_id.to_string(),
-            thread_name: "impl".to_string(),
-            action: "implement the next step".to_string(),
-            source_threads: vec!["auth".to_string(), "tests".to_string()],
-            store_path: Some(store_path.clone()),
-            sandbox: false,
-            backend: BackendKind::Auto,
-            reasoning_effort: None,
-            no_mount_cwd: false,
-            mounts: Vec::new(),
-            mounts_ro: Vec::new(),
-            sandbox_image: DEFAULT_SANDBOX_IMAGE.to_string(),
-            sandbox_gpus: Vec::new(),
-            sandbox_shm_size: None,
-            sandbox_session_key: None,
-            sandbox_workdir: None,
-            api_base_url: None,
-            api_model: None,
+            dispatch: WorkerDispatchArgs {
+                session_id: session_id.to_string(),
+                thread_name: "impl".to_string(),
+                action: "implement the next step".to_string(),
+                source_threads: vec!["auth".to_string(), "tests".to_string()],
+            },
+            store: StoreArgs {
+                store_path: Some(store_path.clone()),
+            },
+            model: default_model_args(),
+            sandbox: default_sandbox_args(),
         };
 
         let run_config = build_managed_worker_config(cli).await.unwrap();
@@ -506,28 +544,25 @@ mod tests {
         let _guard = TEST_ENV_LOCK.lock().unwrap();
 
         let original_api_key = std::env::var("OPENAI_API_KEY").ok();
-        let original_nac_home = std::env::var_os("NAC_HOME");
         let original_cwd = std::env::current_dir().unwrap();
         unsafe {
             std::env::set_var("OPENAI_API_KEY", "test_dummy_key");
         }
-        let nac_home = std::env::temp_dir().join(format!(
-            "nac_resume_restore_home_{}",
+        let session_root = std::env::temp_dir().join(format!(
+            "nac_resume_restore_store_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time went backwards")
                 .as_nanos()
         ));
-        let session_cwd = nac_home.join("repo");
+        let session_cwd = session_root.join("repo");
         std::fs::create_dir_all(&session_cwd).unwrap();
-        unsafe {
-            std::env::set_var("NAC_HOME", &nac_home);
-        }
+        let store_path = session_cwd.join(".nac/store.db");
 
         let snapshot = sessions::new_snapshot(
             "resume-session".to_string(),
             session_cwd.clone(),
-            session_cwd.join(".nac/store.db"),
+            store_path,
             "resume-model".to_string(),
             "https://api.openai.com/v1".to_string(),
             BackendKind::OpenAiResponses,
@@ -554,6 +589,8 @@ mod tests {
         let run_config = build_resume_config(ResumeCli {
             session_id: Some("resume-session".to_string()),
             last: false,
+            directory: Some(session_cwd.clone()),
+            store: StoreArgs { store_path: None },
         })
         .await
         .unwrap();
@@ -582,7 +619,7 @@ mod tests {
         }
 
         std::env::set_current_dir(original_cwd).unwrap();
-        let _ = std::fs::remove_dir_all(nac_home);
+        let _ = std::fs::remove_dir_all(session_root);
 
         if let Some(key) = original_api_key {
             unsafe {
@@ -592,10 +629,6 @@ mod tests {
             unsafe {
                 std::env::remove_var("OPENAI_API_KEY");
             }
-        }
-        match original_nac_home {
-            Some(value) => unsafe { std::env::set_var("NAC_HOME", value) },
-            None => unsafe { std::env::remove_var("NAC_HOME") },
         }
     }
 }

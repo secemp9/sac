@@ -608,7 +608,8 @@ impl App {
     }
 
     pub(super) fn refresh_session_picker(&mut self) {
-        match tokio::task::block_in_place(|| sessions::list_sessions()) {
+        let store_path = self.metadata.store_path.clone();
+        match tokio::task::block_in_place(move || sessions::list_sessions(&store_path)) {
             Ok(sessions) => {
                 let current_session = self.metadata.session_id.as_deref();
                 let selected = current_session
