@@ -2197,7 +2197,7 @@ impl App {
                 }
             },
             None => vec![Line::from(Span::styled(
-                "Waiting for the first orchestrator reply.",
+                "Awaiting orchestrator reply.",
                 Style::default().fg(Color::DarkGray),
             ))],
         };
