@@ -57,6 +57,17 @@ impl ModelClient {
             BackendKind::DeepSeekChat => self.send_deepseek_chat(messages, tools).await,
             BackendKind::FireworksChat => self.send_fireworks_chat(messages, tools).await,
             BackendKind::OpenAiResponses => self.send_openai_responses(messages, tools).await,
+            BackendKind::ChatGptCodexResponses => {
+                chatgpt_codex::send_responses(
+                    &self.client,
+                    &self.base_url,
+                    &self.model,
+                    self.reasoning_effort,
+                    messages,
+                    tools,
+                )
+                .await
+            }
         }
     }
 
