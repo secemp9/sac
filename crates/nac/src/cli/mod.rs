@@ -3,14 +3,17 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser, Subcommand};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentConfig, AgentMode};
 use crate::agents_md::AgentsMdBundle;
 use crate::events::EventSink;
 use crate::mcp::McpRegistry;
-use crate::model::{BackendKind, ClientOverrides, ModelClient, ReasoningEffort};
+use crate::model::{
+    codex_auth_login, codex_auth_logout, codex_auth_status, BackendKind, ClientOverrides,
+    ModelClient, ReasoningEffort,
+};
 use crate::sandbox::{
     build_sandbox_spec, parse_mount_spec, SandboxSession, DEFAULT_SANDBOX_IMAGE,
     DEFAULT_SANDBOX_WORKDIR,
@@ -47,17 +50,24 @@ pub async fn run() -> Result<()> {
                 std::env::set_current_dir(dir)?;
             }
         }
+        ParsedCli::CodexAuth(_) => {}
         ParsedCli::ManagedWorker(_) => {}
     }
 
     let terminal_available =
         io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal();
-    if !matches!(cli, ParsedCli::ManagedWorker(_)) && !terminal_available {
+    if !matches!(cli, ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_)) && !terminal_available
+    {
         if matches!(&cli, ParsedCli::Resume(resume_cli) if resume_cli.session_id.is_none() && !resume_cli.last)
         {
             anyhow::bail!("resume requires an interactive terminal");
         }
         anyhow::bail!("interactive mode requires the TUI; run nac from a terminal");
+    }
+
+    if let ParsedCli::CodexAuth(cli) = cli {
+        run_codex_auth_cli(cli).await?;
+        return Ok(());
     }
 
     let app_config = NacConfig::load()?;
@@ -87,7 +97,10 @@ pub async fn run() -> Result<()> {
                     model: client.model.clone(),
                     base_url: client.base_url().to_string(),
                     backend: client.backend().as_str().to_string(),
-                    reasoning_effort: if client.backend() == BackendKind::OpenAiResponses {
+                    reasoning_effort: if matches!(
+                        client.backend(),
+                        BackendKind::OpenAiResponses | BackendKind::ChatGptCodexResponses
+                    ) {
                         client
                             .reasoning_effort()
                             .map(|effort| effort.as_str().to_string())
@@ -157,6 +170,21 @@ async fn build_run_state(cli: ParsedCli, config: &NacConfig) -> Result<RunState>
                 start_in_session_picker: false,
                 ui_mode,
             })
+        }
+        ParsedCli::CodexAuth(_) => unreachable!("codex-auth is handled before loading config"),
+    }
+}
+
+async fn run_codex_auth_cli(cli: CodexAuthCli) -> Result<()> {
+    match cli.command {
+        Some(CodexAuthCommand::Login) => codex_auth_login().await,
+        Some(CodexAuthCommand::Status) => codex_auth_status(),
+        Some(CodexAuthCommand::Logout) => codex_auth_logout(),
+        None => {
+            let mut command = CodexAuthCli::command();
+            command.print_help()?;
+            println!();
+            Ok(())
         }
     }
 }
@@ -737,8 +765,9 @@ url = "https://mcp.context7.com/mcp"
             ParsedCli::Resume(resume) => {
                 assert_eq!(resume.session_id.as_deref(), Some("session-123"))
             }
-            ParsedCli::Run(_) => panic!("expected resume cli"),
-            ParsedCli::ManagedWorker(_) => panic!("expected resume cli"),
+            ParsedCli::Run(_) | ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) => {
+                panic!("expected resume cli")
+            }
         }
     }
 
@@ -750,8 +779,9 @@ url = "https://mcp.context7.com/mcp"
                 assert!(resume.session_id.is_none());
                 assert!(!resume.last);
             }
-            ParsedCli::Run(_) => panic!("expected resume cli"),
-            ParsedCli::ManagedWorker(_) => panic!("expected resume cli"),
+            ParsedCli::Run(_) | ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) => {
+                panic!("expected resume cli")
+            }
         }
     }
 
@@ -760,7 +790,9 @@ url = "https://mcp.context7.com/mcp"
         let parsed = parse_cli_from(vec![OsString::from("nac"), OsString::from("--compact")]);
         match parsed {
             ParsedCli::Run(run) => assert!(run.ui.compact),
-            ParsedCli::Resume(_) | ParsedCli::ManagedWorker(_) => panic!("expected run cli"),
+            ParsedCli::Resume(_) | ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) => {
+                panic!("expected run cli")
+            }
         }
     }
 
@@ -777,7 +809,9 @@ url = "https://mcp.context7.com/mcp"
                 assert!(resume.ui.compact);
                 assert!(resume.last);
             }
-            ParsedCli::Run(_) | ParsedCli::ManagedWorker(_) => panic!("expected resume cli"),
+            ParsedCli::Run(_) | ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) => {
+                panic!("expected resume cli")
+            }
         }
     }
 
@@ -802,7 +836,34 @@ url = "https://mcp.context7.com/mcp"
                 assert_eq!(worker.dispatch.action, "do work");
                 assert_eq!(worker.dispatch.source_threads, vec!["research"]);
             }
-            ParsedCli::Run(_) | ParsedCli::Resume(_) => panic!("expected managed worker cli"),
+            ParsedCli::Run(_) | ParsedCli::Resume(_) | ParsedCli::CodexAuth(_) => {
+                panic!("expected managed worker cli")
+            }
+        }
+    }
+
+    #[test]
+    fn parse_codex_auth_command_uses_codex_auth_cli() {
+        let parsed = parse_cli_from(vec![OsString::from("nac"), OsString::from("codex-auth")]);
+        match parsed {
+            ParsedCli::CodexAuth(cli) => assert!(cli.command.is_none()),
+            ParsedCli::Run(_) | ParsedCli::Resume(_) | ParsedCli::ManagedWorker(_) => {
+                panic!("expected codex-auth cli")
+            }
+        }
+
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("codex-auth"),
+            OsString::from("status"),
+        ]);
+        match parsed {
+            ParsedCli::CodexAuth(cli) => {
+                assert!(matches!(cli.command, Some(CodexAuthCommand::Status)))
+            }
+            ParsedCli::Run(_) | ParsedCli::Resume(_) | ParsedCli::ManagedWorker(_) => {
+                panic!("expected codex-auth cli")
+            }
         }
     }
 

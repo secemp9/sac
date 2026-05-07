@@ -4,6 +4,7 @@ pub(super) fn default_model_for_backend(backend: BackendKind) -> String {
     match backend {
         BackendKind::DeepSeekChat => "deepseek-v4-pro".to_string(),
         BackendKind::OpenAiResponses => "gpt-5.5".to_string(),
+        BackendKind::ChatGptCodexResponses => "gpt-5.5".to_string(),
         BackendKind::FireworksChat => "gpt-5.5".to_string(),
         BackendKind::Auto => unreachable!("auto backend does not have a default model"),
     }
@@ -11,7 +12,9 @@ pub(super) fn default_model_for_backend(backend: BackendKind) -> String {
 
 pub(super) fn default_reasoning_effort(backend: BackendKind) -> Option<ReasoningEffort> {
     match backend {
-        BackendKind::OpenAiResponses => Some(ReasoningEffort::Xhigh),
+        BackendKind::OpenAiResponses | BackendKind::ChatGptCodexResponses => {
+            Some(ReasoningEffort::Xhigh)
+        }
         BackendKind::DeepSeekChat => None,
         BackendKind::FireworksChat => None,
         BackendKind::Auto => None,
@@ -21,6 +24,7 @@ pub(super) fn default_reasoning_effort(backend: BackendKind) -> Option<Reasoning
 pub(super) fn default_base_url_for_backend_hint(backend: BackendKind) -> &'static str {
     match backend {
         BackendKind::DeepSeekChat => "https://api.deepseek.com",
+        BackendKind::ChatGptCodexResponses => "https://chatgpt.com/backend-api",
         BackendKind::Auto | BackendKind::FireworksChat | BackendKind::OpenAiResponses => {
             "https://api.openai.com/v1"
         }
@@ -32,6 +36,7 @@ pub(super) fn api_key_for_backend(
     configured_env: Option<&str>,
 ) -> Result<String> {
     match backend {
+        BackendKind::ChatGptCodexResponses => Ok(String::new()),
         BackendKind::Auto
         | BackendKind::DeepSeekChat
         | BackendKind::FireworksChat
@@ -68,9 +73,12 @@ pub fn detect_backend(base_url: &str) -> Result<BackendKind> {
     if host == "api.openai.com" {
         return Ok(BackendKind::OpenAiResponses);
     }
+    if host == "chatgpt.com" && parsed.path().contains("/backend-api") {
+        return Ok(BackendKind::ChatGptCodexResponses);
+    }
 
     Err(anyhow!(
-        "could not infer backend from '{}'; pass --backend deepseek-chat, --backend fireworks-chat, or --backend openai-responses",
+        "could not infer backend from '{}'; pass --backend deepseek-chat, --backend fireworks-chat, --backend openai-responses, or --backend chatgpt-codex-responses",
         base_url
     ))
 }

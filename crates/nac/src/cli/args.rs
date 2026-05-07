@@ -4,7 +4,7 @@ use super::*;
 #[command(
     name = "nac",
     about = "agent",
-    after_help = "Use `nac resume` to continue a saved session."
+    after_help = "Commands:\n  nac resume [SESSION_ID]    Continue a saved session\n  nac codex-auth [COMMAND]   Manage ChatGPT Codex auth"
 )]
 pub(super) struct RunCli {
     /// Working directory (default: current directory)
@@ -160,10 +160,28 @@ pub(super) struct ResumeCli {
     pub(super) ui: UiArgs,
 }
 
+#[derive(Parser)]
+#[command(name = "nac codex-auth", about = "manage ChatGPT Codex auth")]
+pub(super) struct CodexAuthCli {
+    #[command(subcommand)]
+    pub(super) command: Option<CodexAuthCommand>,
+}
+
+#[derive(Subcommand)]
+pub(super) enum CodexAuthCommand {
+    /// Sign in with ChatGPT using device code authorization
+    Login,
+    /// Show stored Codex auth status
+    Status,
+    /// Remove stored Codex auth
+    Logout,
+}
+
 pub(super) enum ParsedCli {
     Run(RunCli),
     ManagedWorker(ManagedWorkerCli),
     Resume(ResumeCli),
+    CodexAuth(CodexAuthCli),
 }
 
 pub(super) fn parse_cli() -> ParsedCli {
@@ -188,6 +206,14 @@ pub(super) fn parse_cli_from(args: Vec<OsString>) -> ParsedCli {
         worker_args.push(OsString::from("nac __worker"));
         worker_args.extend(args.into_iter().skip(2));
         ParsedCli::ManagedWorker(ManagedWorkerCli::parse_from(worker_args))
+    } else if args
+        .get(1)
+        .is_some_and(|value| value == OsStr::new("codex-auth"))
+    {
+        let mut codex_auth_args = Vec::with_capacity(args.len().saturating_sub(1));
+        codex_auth_args.push(OsString::from("nac codex-auth"));
+        codex_auth_args.extend(args.into_iter().skip(2));
+        ParsedCli::CodexAuth(CodexAuthCli::parse_from(codex_auth_args))
     } else {
         ParsedCli::Run(RunCli::parse_from(args))
     }

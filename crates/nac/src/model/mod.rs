@@ -11,6 +11,7 @@ use crate::types::{FunctionCall, Message, ToolCall, ToolDefinition, Usage};
 
 mod backend;
 mod chat;
+mod chatgpt_codex;
 mod client;
 mod requests;
 mod responses;
@@ -18,6 +19,7 @@ mod types;
 mod usage;
 
 pub use backend::detect_backend;
+pub use chatgpt_codex::{codex_auth_login, codex_auth_logout, codex_auth_status};
 pub use client::ModelClient;
 pub use types::*;
 

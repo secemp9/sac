@@ -13,6 +13,8 @@ Pinned version installs are not supported yet.
 
 Set `OPENAI_API_KEY`, then run `nac`. Use `nac --compact` for the compact single-column TUI, or `nac --full` to override a compact config default.
 
+To use ChatGPT Codex auth instead of an OpenAI API key, run `nac codex-auth` and complete the device-code flow in a browser. Configure `backend = "chatgpt-codex-responses"` under `[model]`.
+
 Optional:
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
@@ -66,7 +68,7 @@ mode = "full" # "full" or "compact"
 store_path = ".nac/store.db"
 
 [model]
-backend = "openai-responses" # "auto", "deepseek-chat", "fireworks-chat", or "openai-responses"
+backend = "openai-responses" # "auto", "deepseek-chat", "fireworks-chat", "openai-responses", or "chatgpt-codex-responses"
 model = "gpt-5.5"
 base_url = "https://api.openai.com/v1"
 reasoning_effort = "xhigh"
@@ -95,3 +97,5 @@ url = "https://mcp.grep.app"
 ```
 
 Supported MCP transports right now are `stdio` and `streamable_http`. Stdio servers can provide `command`, `args`, and `env`; streamable HTTP servers provide `url` and optional `headers`. MCP string values support `${ENV_VAR}` expansion.
+
+For ChatGPT Codex auth, the default base URL is `https://chatgpt.com/backend-api`; NAC sends non-streaming Responses requests to `/codex/responses`. Use `nac codex-auth status` to inspect the saved account and `nac codex-auth logout` to remove local tokens.
