@@ -13,7 +13,7 @@ Pinned version installs are not supported yet.
 
 Set `OPENAI_API_KEY`, then run `nac`. Use `nac --compact` for the compact single-column TUI, or `nac --full` to override a compact config default.
 
-To use ChatGPT Codex auth instead of an OpenAI API key, run `nac codex-auth login` and complete the device-code flow in a browser. Configure `backend = "chatgpt-codex-responses"` under `[model]`.
+To use ChatGPT Codex auth instead of an OpenAI API key, run `nac codex-auth login` and complete the device-code flow in a browser. Launch with `nac --backend chatgpt-codex-responses`, or configure `backend = "chatgpt-codex-responses"` under `[model]`.
 
 Optional:
 - `OPENAI_BASE_URL`
@@ -68,13 +68,13 @@ fallback_filenames = []
 max_bytes = 4194304
 
 [ui]
-mode = "full" # "full" or "compact"
+mode = "full"
 
 [storage]
 store_path = ".nac/store.db"
 
 [model]
-backend = "openai-responses" # "auto", "deepseek-chat", "fireworks-chat", "openai-responses", or "chatgpt-codex-responses"
+backend = "openai-responses"
 model = "gpt-5.5"
 base_url = "https://api.openai.com/v1"
 reasoning_effort = "xhigh"
