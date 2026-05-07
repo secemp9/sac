@@ -29,12 +29,14 @@ mod config;
 mod managed_worker;
 mod resume;
 mod sandbox;
+mod upgrade;
 
 use args::*;
 use config::*;
 use managed_worker::*;
 use resume::*;
 use sandbox::*;
+use upgrade::*;
 
 pub async fn run() -> Result<()> {
     let cli = parse_cli();
@@ -51,12 +53,16 @@ pub async fn run() -> Result<()> {
             }
         }
         ParsedCli::CodexAuth(_) => {}
+        ParsedCli::Upgrade(_) => {}
         ParsedCli::ManagedWorker(_) => {}
     }
 
     let terminal_available =
         io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal();
-    if !matches!(cli, ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_)) && !terminal_available
+    if !matches!(
+        cli,
+        ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) | ParsedCli::Upgrade(_)
+    ) && !terminal_available
     {
         if matches!(&cli, ParsedCli::Resume(resume_cli) if resume_cli.session_id.is_none() && !resume_cli.last)
         {
@@ -67,6 +73,11 @@ pub async fn run() -> Result<()> {
 
     if let ParsedCli::CodexAuth(cli) = cli {
         run_codex_auth_cli(cli).await?;
+        return Ok(());
+    }
+
+    if let ParsedCli::Upgrade(cli) = cli {
+        run_upgrade_cli(cli).await?;
         return Ok(());
     }
 
@@ -172,6 +183,7 @@ async fn build_run_state(cli: ParsedCli, config: &NacConfig) -> Result<RunState>
             })
         }
         ParsedCli::CodexAuth(_) => unreachable!("codex-auth is handled before loading config"),
+        ParsedCli::Upgrade(_) => unreachable!("upgrade is handled before loading config"),
     }
 }
 
@@ -765,7 +777,10 @@ url = "https://mcp.context7.com/mcp"
             ParsedCli::Resume(resume) => {
                 assert_eq!(resume.session_id.as_deref(), Some("session-123"))
             }
-            ParsedCli::Run(_) | ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) => {
+            ParsedCli::Run(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::CodexAuth(_)
+            | ParsedCli::Upgrade(_) => {
                 panic!("expected resume cli")
             }
         }
@@ -779,7 +794,10 @@ url = "https://mcp.context7.com/mcp"
                 assert!(resume.session_id.is_none());
                 assert!(!resume.last);
             }
-            ParsedCli::Run(_) | ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) => {
+            ParsedCli::Run(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::CodexAuth(_)
+            | ParsedCli::Upgrade(_) => {
                 panic!("expected resume cli")
             }
         }
@@ -790,7 +808,10 @@ url = "https://mcp.context7.com/mcp"
         let parsed = parse_cli_from(vec![OsString::from("nac"), OsString::from("--compact")]);
         match parsed {
             ParsedCli::Run(run) => assert!(run.ui.compact),
-            ParsedCli::Resume(_) | ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) => {
+            ParsedCli::Resume(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::CodexAuth(_)
+            | ParsedCli::Upgrade(_) => {
                 panic!("expected run cli")
             }
         }
@@ -809,7 +830,10 @@ url = "https://mcp.context7.com/mcp"
                 assert!(resume.ui.compact);
                 assert!(resume.last);
             }
-            ParsedCli::Run(_) | ParsedCli::ManagedWorker(_) | ParsedCli::CodexAuth(_) => {
+            ParsedCli::Run(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::CodexAuth(_)
+            | ParsedCli::Upgrade(_) => {
                 panic!("expected resume cli")
             }
         }
@@ -836,7 +860,10 @@ url = "https://mcp.context7.com/mcp"
                 assert_eq!(worker.dispatch.action, "do work");
                 assert_eq!(worker.dispatch.source_threads, vec!["research"]);
             }
-            ParsedCli::Run(_) | ParsedCli::Resume(_) | ParsedCli::CodexAuth(_) => {
+            ParsedCli::Run(_)
+            | ParsedCli::Resume(_)
+            | ParsedCli::CodexAuth(_)
+            | ParsedCli::Upgrade(_) => {
                 panic!("expected managed worker cli")
             }
         }
@@ -847,7 +874,10 @@ url = "https://mcp.context7.com/mcp"
         let parsed = parse_cli_from(vec![OsString::from("nac"), OsString::from("codex-auth")]);
         match parsed {
             ParsedCli::CodexAuth(cli) => assert!(cli.command.is_none()),
-            ParsedCli::Run(_) | ParsedCli::Resume(_) | ParsedCli::ManagedWorker(_) => {
+            ParsedCli::Run(_)
+            | ParsedCli::Resume(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Upgrade(_) => {
                 panic!("expected codex-auth cli")
             }
         }
@@ -861,9 +891,40 @@ url = "https://mcp.context7.com/mcp"
             ParsedCli::CodexAuth(cli) => {
                 assert!(matches!(cli.command, Some(CodexAuthCommand::Status)))
             }
-            ParsedCli::Run(_) | ParsedCli::Resume(_) | ParsedCli::ManagedWorker(_) => {
+            ParsedCli::Run(_)
+            | ParsedCli::Resume(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Upgrade(_) => {
                 panic!("expected codex-auth cli")
             }
+        }
+    }
+
+    #[test]
+    fn parse_upgrade_command_uses_upgrade_cli() {
+        let parsed = parse_cli_from(vec![OsString::from("nac"), OsString::from("upgrade")]);
+        match parsed {
+            ParsedCli::Upgrade(cli) => assert!(cli.install_dir.is_none()),
+            ParsedCli::Run(_)
+            | ParsedCli::Resume(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::CodexAuth(_) => panic!("expected upgrade cli"),
+        }
+
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("upgrade"),
+            OsString::from("--install-dir"),
+            OsString::from("/tmp/nac-bin"),
+        ]);
+        match parsed {
+            ParsedCli::Upgrade(cli) => {
+                assert_eq!(cli.install_dir.as_deref(), Some(Path::new("/tmp/nac-bin")));
+            }
+            ParsedCli::Run(_)
+            | ParsedCli::Resume(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::CodexAuth(_) => panic!("expected upgrade cli"),
         }
     }
 

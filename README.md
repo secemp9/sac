@@ -13,13 +13,19 @@ Pinned version installs are not supported yet.
 
 Set `OPENAI_API_KEY`, then run `nac`. Use `nac --compact` for the compact single-column TUI, or `nac --full` to override a compact config default.
 
-To use ChatGPT Codex auth instead of an OpenAI API key, run `nac codex-auth` and complete the device-code flow in a browser. Configure `backend = "chatgpt-codex-responses"` under `[model]`.
+To use ChatGPT Codex auth instead of an OpenAI API key, run `nac codex-auth login` and complete the device-code flow in a browser. Configure `backend = "chatgpt-codex-responses"` under `[model]`.
 
 Optional:
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 
 Linux installs use the portable static build.
+
+Upgrade to the latest `edge` build:
+
+```sh
+nac upgrade
+```
 
 `AGENTS.md` is loaded hierarchically from the project and globally from `NAC_HOME` / `~/.config/nac`. Skills are discovered from project and user skill directories and activated from workers with `activate_skill(...)`. Sessions are stored in the project store (`.nac/store.db` by default): use `nac resume` for the picker, `nac resume --last` for the newest session, or `nac resume SESSION_ID` for a specific session. Thread history does not auto-compact right now.
 

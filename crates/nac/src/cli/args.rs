@@ -4,7 +4,7 @@ use super::*;
 #[command(
     name = "nac",
     about = "agent",
-    after_help = "Commands:\n  nac resume [SESSION_ID]    Continue a saved session\n  nac codex-auth [COMMAND]   Manage ChatGPT Codex auth"
+    after_help = "Commands:\n  nac resume [SESSION_ID]    Continue a saved session\n  nac codex-auth [COMMAND]   Manage ChatGPT Codex auth\n  nac upgrade                Reinstall the latest nac release"
 )]
 pub(super) struct RunCli {
     /// Working directory (default: current directory)
@@ -177,11 +177,20 @@ pub(super) enum CodexAuthCommand {
     Logout,
 }
 
+#[derive(Parser)]
+#[command(name = "nac upgrade", about = "reinstall the latest nac release")]
+pub(super) struct UpgradeCli {
+    /// Install directory to replace (default: current nac executable directory)
+    #[arg(long)]
+    pub(super) install_dir: Option<PathBuf>,
+}
+
 pub(super) enum ParsedCli {
     Run(RunCli),
     ManagedWorker(ManagedWorkerCli),
     Resume(ResumeCli),
     CodexAuth(CodexAuthCli),
+    Upgrade(UpgradeCli),
 }
 
 pub(super) fn parse_cli() -> ParsedCli {
@@ -214,6 +223,14 @@ pub(super) fn parse_cli_from(args: Vec<OsString>) -> ParsedCli {
         codex_auth_args.push(OsString::from("nac codex-auth"));
         codex_auth_args.extend(args.into_iter().skip(2));
         ParsedCli::CodexAuth(CodexAuthCli::parse_from(codex_auth_args))
+    } else if args
+        .get(1)
+        .is_some_and(|value| value == OsStr::new("upgrade"))
+    {
+        let mut upgrade_args = Vec::with_capacity(args.len().saturating_sub(1));
+        upgrade_args.push(OsString::from("nac upgrade"));
+        upgrade_args.extend(args.into_iter().skip(2));
+        ParsedCli::Upgrade(UpgradeCli::parse_from(upgrade_args))
     } else {
         ParsedCli::Run(RunCli::parse_from(args))
     }
