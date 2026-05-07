@@ -175,6 +175,14 @@ pub async fn run(
     let running = Arc::new(AtomicBool::new(true));
     let input_thread = spawn_input_thread(running.clone(), input_tx);
 
+    let response_duration_history = session_snapshot.as_ref().and_then(|snapshot| {
+        snapshot.response_durations_ms.as_ref().map(|durations| {
+            durations
+                .iter()
+                .map(|duration| duration.map(Duration::from_millis))
+                .collect::<Vec<_>>()
+        })
+    });
     let (last_response_duration, previous_response_duration) = session_snapshot
         .as_ref()
         .map(|snapshot| {
@@ -194,7 +202,11 @@ pub async fn run(
         start_in_session_picker,
         ui_mode,
     );
-    app.restore_response_durations(last_response_duration, previous_response_duration);
+    app.restore_response_duration_history(
+        response_duration_history.as_deref(),
+        last_response_duration,
+        previous_response_duration,
+    );
     let (ws_tx, ws_rx) = mpsc::channel::<WorkspaceSnapshot>(1);
     app.workspace_tx = Some(ws_tx);
     app.workspace_rx = Some(ws_rx);
@@ -294,11 +306,13 @@ pub async fn run(
                             let agent = agent.lock().await;
                             let (last_response_duration_ms, previous_response_duration_ms) =
                                 app.response_duration_snapshot_ms();
+                            let response_durations_ms = app.response_duration_history_snapshot_ms();
                             persist_session_snapshot(
                                 snapshot,
                                 &agent,
                                 last_response_duration_ms,
                                 previous_response_duration_ms,
+                                response_durations_ms,
                             )
                             .await?;
                         }
@@ -430,6 +444,13 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    fn press_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+        assert!(matches!(
+            app.handle_key_event(KeyEvent::new(code, modifiers)),
+            AppAction::None
+        ));
     }
 
     #[test]
@@ -841,7 +862,195 @@ mod tests {
             prompt_preview: "# /plan: Workset Planning".to_string(),
         });
 
-        assert_eq!(app.last_prompt.as_deref(), Some("/plan refresh auth flow"));
+        assert_eq!(app.prompts, vec!["/plan refresh auth flow".to_string()]);
+        assert_eq!(app.selected_prompt, Some(0));
+        assert_eq!(app.displayed_prompt_index(), Some(0));
+
+        let mut fallback_app = App::new(metadata_for(&dir), &[], false);
+        fallback_app.apply_agent_event(AgentEvent::RunStarted {
+            thread_name: None,
+            prompt_preview: "restored run preview".to_string(),
+        });
+        fallback_app.apply_agent_event(AgentEvent::RunStarted {
+            thread_name: Some("worker".to_string()),
+            prompt_preview: "worker preview".to_string(),
+        });
+        assert_eq!(
+            fallback_app.prompts,
+            vec!["restored run preview".to_string()]
+        );
+        assert_eq!(fallback_app.selected_prompt, Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prompt_history_hydrates_user_messages_and_slash_display_mapping() {
+        let dir = temp_dir("prompt-history-hydrate");
+        let messages = vec![
+            Message::User {
+                content: "first prompt".to_string(),
+            },
+            Message::Assistant {
+                content: Some("reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: None,
+            },
+            Message::User {
+                content: build_plan_command_prompt("split this into reviewable units"),
+            },
+            Message::User {
+                content: build_run_command_prompt("auth-refresh"),
+            },
+        ];
+
+        let app = App::new(metadata_for(&dir), &messages, false);
+
+        assert_eq!(
+            app.prompts,
+            vec![
+                "first prompt".to_string(),
+                "/plan split this into reviewable units".to_string(),
+                "/run auth-refresh".to_string(),
+            ]
+        );
+        assert_eq!(app.selected_prompt, Some(2));
+        assert_eq!(app.displayed_prompt_index(), Some(2));
+        assert!(line_to_plain_text(&app.prompt_panel_title()).contains("PROMPTS 3/3"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn composer_title_shows_timer_only_while_run_is_active() {
+        let dir = temp_dir("composer-title-timer");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+
+        let idle_text = line_to_plain_text(&app.composer_panel_title());
+        assert_eq!(idle_text, " [ ASK ] ");
+        assert!(!idle_text.contains("T+"));
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        app.result_rx = Some(rx);
+        app.working_started_at = Some(Instant::now() - Duration::from_secs(3));
+
+        let running_title = app.composer_panel_title();
+        let running_text = line_to_plain_text(&running_title);
+        assert!(running_text.starts_with(" [ ASK T+"));
+        assert!(running_text.ends_with(" ] "));
+        assert!(running_title.spans.iter().any(|span| {
+            span.content.as_ref().contains("ASK")
+                && span.style.fg == Some(Color::Cyan)
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(running_title.spans.iter().any(|span| {
+            span.content.as_ref().starts_with("T+") && span.style.fg == Some(Color::Green)
+        }));
+
+        app.result_rx = None;
+        app.working_started_at = None;
+        app.complete_top_level_response("done".to_string(), Duration::from_secs(7));
+        assert_eq!(
+            app.responses.last().and_then(|response| response.duration),
+            Some(Duration::from_secs(7))
+        );
+
+        let idle_again_text = line_to_plain_text(&app.composer_panel_title());
+        assert_eq!(idle_again_text, " [ ASK ] ");
+        assert!(!idle_again_text.contains("T+"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prompt_history_focus_navigation_guard_and_reset_to_latest() {
+        let dir = temp_dir("prompt-history-nav");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.note_prompt_submitted("one");
+        app.note_prompt_submitted("two");
+        app.note_prompt_submitted("three");
+
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.selected_prompt, Some(2));
+
+        press_key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            app.screen,
+            ScreenMode::Focused(FocusPanel::Prompt)
+        ));
+        assert_eq!(app.displayed_prompt_index(), Some(2));
+
+        app.panel_scrolls.insert(PanelId::Prompt, 12);
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.selected_prompt, Some(1));
+        assert_eq!(app.panel_scrolls.get(&PanelId::Prompt), Some(&0));
+        assert!(line_to_plain_text(&app.prompt_panel_title()).contains("PROMPTS 2/3"));
+
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.selected_prompt, Some(0));
+
+        press_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        press_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        press_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.selected_prompt, Some(2));
+
+        app.selected_prompt = Some(0);
+        press_key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(app.screen, ScreenMode::Dashboard);
+        assert_eq!(app.selected_prompt, Some(2));
+        assert_eq!(app.displayed_prompt_index(), Some(2));
+
+        press_key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.selected_prompt, Some(1));
+        press_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.screen, ScreenMode::Dashboard);
+        assert_eq!(app.selected_prompt, Some(2));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn switching_focus_from_prompt_returns_display_to_latest() {
+        let dir = temp_dir("prompt-focus-switch");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.note_prompt_submitted("one");
+        app.note_prompt_submitted("two");
+        app.complete_top_level_response("reply".to_string(), Duration::from_secs(1));
+        app.screen = ScreenMode::Focused(FocusPanel::Prompt);
+        app.selected_prompt = Some(0);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::None));
+        assert!(matches!(
+            app.screen,
+            ScreenMode::Focused(FocusPanel::Response)
+        ));
+        assert_eq!(app.selected_prompt, Some(1));
+        assert_eq!(app.displayed_prompt_index(), Some(1));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn primary_scroll_panel_uses_prompt_when_prompt_focused() {
+        let dir = temp_dir("prompt-primary-scroll");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.screen = ScreenMode::Focused(FocusPanel::Prompt);
+
+        assert_eq!(app.primary_scroll_panel(), PanelId::Prompt);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compact_stream_uses_latest_prompt_from_history() {
+        let dir = temp_dir("compact-stream-latest-prompt");
+        let mut app = App::new_with_mode(metadata_for(&dir), &[], false, UiMode::Compact);
+        app.note_prompt_submitted("first compact prompt");
+        app.note_prompt_submitted("second compact prompt");
+
+        let lines = app.compact_stream_lines(80);
+
+        assert!(line_to_plain_text(&lines[0]).contains("second compact prompt"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1005,38 +1214,52 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_focuses_response_and_escape_returns_dashboard() {
-        let dir = temp_dir("response-focus");
+    fn response_history_focus_navigation_and_reset_to_latest() {
+        let dir = temp_dir("response-history-nav");
         let mut app = App::new(metadata_for(&dir), &[], false);
+        app.complete_top_level_response("one".to_string(), Duration::from_secs(1));
+        app.complete_top_level_response("two".to_string(), Duration::from_secs(2));
+        app.complete_top_level_response("three".to_string(), Duration::from_secs(3));
 
-        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        assert!(matches!(action, AppAction::None));
+        press_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         assert!(matches!(
             app.screen,
             ScreenMode::Focused(FocusPanel::Response)
         ));
+        assert_eq!(app.displayed_response_index(), Some(2));
 
-        let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(action, AppAction::None));
+        app.panel_scrolls.insert(PanelId::Response, 12);
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.selected_response, Some(1));
+        assert_eq!(app.panel_scrolls.get(&PanelId::Response), Some(&0));
+        assert_eq!(app.displayed_response_index(), Some(1));
+
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.selected_response, Some(0));
+
+        press_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        press_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        press_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.selected_response, Some(2));
+
+        app.selected_response = Some(0);
+        press_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         assert_eq!(app.screen, ScreenMode::Dashboard);
+        assert_eq!(app.selected_response, Some(2));
+        assert_eq!(app.displayed_response_index(), Some(2));
+
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn ctrl_p_focuses_previous_response_and_escape_returns_dashboard() {
-        let dir = temp_dir("previous-response-focus");
+    fn ctrl_o_still_focuses_tools() {
+        let dir = temp_dir("tools-focus");
         let mut app = App::new(metadata_for(&dir), &[], false);
 
-        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(matches!(action, AppAction::None));
-        assert!(matches!(
-            app.screen,
-            ScreenMode::Focused(FocusPanel::PreviousResponse)
-        ));
-
-        let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(matches!(action, AppAction::None));
-        assert_eq!(app.screen, ScreenMode::Dashboard);
+        assert!(matches!(app.screen, ScreenMode::Focused(FocusPanel::Tools)));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1139,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn response_runtime_tracks_placeholder_current_previous_and_ignored_event() {
+    fn response_history_tracks_runtime_snapshots_and_ignored_event() {
         let dir = temp_dir("response-runtime");
         let mut app = App::new(metadata_for(&dir), &[], false);
 
@@ -1147,41 +1370,63 @@ mod tests {
             format_optional_runtime(app.displayed_run_duration()),
             "T+--:--:--"
         );
+        assert_eq!(app.response_duration_snapshot_ms(), (None, None));
         assert_eq!(
-            format_optional_runtime(app.previous_response_duration),
-            "T+--:--:--"
+            app.response_duration_history_snapshot_ms(),
+            Vec::<Option<u64>>::new()
         );
 
         app.apply_agent_event(AgentEvent::AssistantMessage {
             thread_name: None,
             content: "ignored".to_string(),
         });
-        assert_eq!(app.last_response, None);
+        assert!(app.responses.is_empty());
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        app.result_rx = Some(rx);
+        app.working_started_at = Some(Instant::now() - Duration::from_secs(3));
+        let (runtime, is_live) = app.response_panel_runtime(None);
+        assert!(runtime.is_some());
+        assert!(is_live);
+        app.result_rx = None;
+        app.working_started_at = None;
 
         app.complete_top_level_response("first reply".to_string(), Duration::from_secs(1));
-        assert_eq!(app.last_response.as_deref(), Some("first reply"));
-        assert_eq!(app.last_response_duration, Some(Duration::from_secs(1)));
-        assert_eq!(app.previous_response, None);
+        assert_eq!(app.responses.len(), 1);
+        assert_eq!(app.responses[0].content, "first reply");
+        assert_eq!(app.responses[0].duration, Some(Duration::from_secs(1)));
+        assert_eq!(app.selected_response, Some(0));
+        assert_eq!(app.response_duration_snapshot_ms(), (Some(1_000), None));
+        assert_eq!(
+            app.response_duration_history_snapshot_ms(),
+            vec![Some(1_000)]
+        );
 
         app.note_prompt_submitted("second prompt");
-        assert_eq!(app.last_response, None);
-        assert_eq!(app.last_response_duration, None);
-        assert_eq!(app.previous_response.as_deref(), Some("first reply"));
-        assert_eq!(app.previous_response_duration, Some(Duration::from_secs(1)));
+        assert_eq!(app.responses.len(), 1);
+        assert_eq!(app.displayed_response_index(), Some(0));
 
         app.complete_top_level_response("second reply".to_string(), Duration::from_secs(2));
-        assert_eq!(app.last_response.as_deref(), Some("second reply"));
-        assert_eq!(app.last_response_duration, Some(Duration::from_secs(2)));
-        assert_eq!(app.previous_response.as_deref(), Some("first reply"));
-        assert_eq!(app.previous_response_duration, Some(Duration::from_secs(1)));
+        assert_eq!(app.responses.len(), 2);
+        assert_eq!(app.responses[1].content, "second reply");
+        assert_eq!(app.responses[1].duration, Some(Duration::from_secs(2)));
+        assert_eq!(app.selected_response, Some(1));
+        assert_eq!(
+            app.response_duration_snapshot_ms(),
+            (Some(2_000), Some(1_000))
+        );
+        assert_eq!(
+            app.response_duration_history_snapshot_ms(),
+            vec![Some(1_000), Some(2_000)]
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn response_durations_restore_with_hydrated_responses() {
-        let dir = temp_dir("response-runtime-hydrate");
-        let metadata = metadata_for(&dir);
+    fn response_duration_history_round_trips_through_session_snapshot_and_resume_restore() {
+        let dir = temp_dir("response-duration-round-trip");
+        let mut metadata = metadata_for(&dir);
         let messages = vec![
             Message::Assistant {
                 content: Some("first reply".to_string()),
@@ -1195,15 +1440,207 @@ mod tests {
                 reasoning_details: None,
                 tool_calls: None,
             },
+            Message::Assistant {
+                content: Some("third reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: None,
+            },
+        ];
+        let session_id = "session-response-durations".to_string();
+        metadata.session_id = Some(session_id.clone());
+        let mut snapshot = sessions::new_snapshot(
+            session_id.clone(),
+            dir.clone(),
+            metadata.store_path.clone(),
+            metadata.model.clone(),
+            metadata.base_url.clone(),
+            crate::model::BackendKind::OpenAiResponses,
+            None,
+            None,
+            messages,
+        );
+        snapshot.last_response_duration_ms = Some(3_333);
+        snapshot.previous_response_duration_ms = Some(2_222);
+        snapshot.response_durations_ms = Some(vec![Some(1_111), Some(2_222), Some(3_333)]);
+        sessions::create_session(&snapshot).unwrap();
+
+        let loaded = sessions::load_session(&metadata.store_path, &session_id).unwrap();
+        assert_eq!(
+            loaded.response_durations_ms,
+            Some(vec![Some(1_111), Some(2_222), Some(3_333)])
+        );
+        let restored_durations = loaded.response_durations_ms.as_ref().map(|durations| {
+            durations
+                .iter()
+                .map(|duration| duration.map(Duration::from_millis))
+                .collect::<Vec<_>>()
+        });
+        let mut app = App::new_with_mode(metadata, &loaded.messages, false, UiMode::Full);
+        app.restore_response_duration_history(
+            restored_durations.as_deref(),
+            loaded.last_response_duration_ms.map(Duration::from_millis),
+            loaded
+                .previous_response_duration_ms
+                .map(Duration::from_millis),
+        );
+
+        let contents = app
+            .responses
+            .iter()
+            .map(|response| response.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["first reply", "second reply", "third reply"]);
+        assert_eq!(
+            app.response_duration_history_snapshot_ms(),
+            vec![Some(1_111), Some(2_222), Some(3_333)]
+        );
+        assert_eq!(
+            app.response_duration_snapshot_ms(),
+            (Some(3_333), Some(2_222))
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn response_duration_history_restore_prefers_full_vector() {
+        let dir = temp_dir("response-runtime-full-history");
+        let metadata = metadata_for(&dir);
+        let messages = vec![
+            Message::Assistant {
+                content: Some("first reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: None,
+            },
+            Message::Assistant {
+                content: Some("tool call carrier".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: Some(vec![crate::types::ToolCall {
+                    id: "call-1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::types::FunctionCall {
+                        name: "read".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+            },
+            Message::Assistant {
+                content: Some("second reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: None,
+            },
+            Message::Assistant {
+                content: None,
+                reasoning_text: Some("reasoning-only final".to_string()),
+                reasoning_details: None,
+                tool_calls: None,
+            },
+            Message::Assistant {
+                content: Some("third reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: Some(Vec::new()),
+            },
         ];
 
         let mut app = App::new_with_mode(metadata, &messages, false, UiMode::Full);
-        app.restore_response_durations(Some(Duration::from_secs(9)), Some(Duration::from_secs(4)));
+        let response_durations = vec![
+            Some(Duration::from_secs(1)),
+            None,
+            Some(Duration::from_secs(3)),
+            Some(Duration::from_secs(4)),
+        ];
+        app.restore_response_duration_history(
+            Some(response_durations.as_slice()),
+            Some(Duration::from_secs(9)),
+            Some(Duration::from_secs(4)),
+        );
 
-        assert_eq!(app.last_response.as_deref(), Some("second reply"));
-        assert_eq!(app.last_response_duration, Some(Duration::from_secs(9)));
-        assert_eq!(app.previous_response.as_deref(), Some("first reply"));
-        assert_eq!(app.previous_response_duration, Some(Duration::from_secs(4)));
+        let contents = app
+            .responses
+            .iter()
+            .map(|response| response.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            vec![
+                "first reply",
+                "second reply",
+                "[No response]",
+                "third reply"
+            ]
+        );
+        assert_eq!(app.responses[0].duration, Some(Duration::from_secs(1)));
+        assert_eq!(app.responses[1].duration, None);
+        assert_eq!(app.responses[2].duration, Some(Duration::from_secs(3)));
+        assert_eq!(app.responses[3].duration, Some(Duration::from_secs(4)));
+        assert_eq!(
+            app.response_duration_history_snapshot_ms(),
+            vec![Some(1_000), None, Some(3_000), Some(4_000)]
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn response_durations_restore_with_hydrated_response_history() {
+        let dir = temp_dir("response-runtime-hydrate");
+        let metadata = metadata_for(&dir);
+        let messages = vec![
+            Message::Assistant {
+                content: Some("first reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: None,
+            },
+            Message::Assistant {
+                content: Some("tool call carrier".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: Some(vec![crate::types::ToolCall {
+                    id: "call-1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::types::FunctionCall {
+                        name: "read".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+            },
+            Message::Assistant {
+                content: Some("second reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: None,
+            },
+            Message::Assistant {
+                content: Some("third reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: Some(Vec::new()),
+            },
+        ];
+
+        let mut app = App::new_with_mode(metadata, &messages, false, UiMode::Full);
+        app.restore_response_duration_history(
+            None,
+            Some(Duration::from_secs(9)),
+            Some(Duration::from_secs(4)),
+        );
+
+        let contents = app
+            .responses
+            .iter()
+            .map(|response| response.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["first reply", "second reply", "third reply"]);
+        assert_eq!(app.responses[0].duration, None);
+        assert_eq!(app.responses[1].duration, Some(Duration::from_secs(4)));
+        assert_eq!(app.responses[2].duration, Some(Duration::from_secs(9)));
+        assert_eq!(app.selected_response, Some(2));
 
         let _ = std::fs::remove_dir_all(dir);
     }

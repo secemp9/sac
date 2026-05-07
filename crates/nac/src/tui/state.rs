@@ -80,13 +80,18 @@ pub(super) enum PanelId {
     Events,
     Threads,
     Response,
-    PreviousResponse,
     Workspace,
     Tools,
     Worksets,
     ThreadList,
     ThreadEpisodes,
     CompactStream,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResponseEntry {
+    pub(super) content: String,
+    pub(super) duration: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -340,9 +345,9 @@ pub(super) struct SelectionState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FocusPanel {
+    Prompt,
     Events,
     Response,
-    PreviousResponse,
     Threads,
     Tools,
     Workspace,
