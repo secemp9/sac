@@ -914,6 +914,66 @@ mod tests {
     }
 
     #[test]
+    fn composer_title_shows_timer_only_while_run_is_active() {
+        let dir = temp_dir("composer-title-timer");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+
+        let idle_title = app.composer_panel_title();
+        assert_eq!(line_to_plain_text(&idle_title), " [ ASK ] ");
+        assert!(!line_to_plain_text(&idle_title).contains("T+"));
+        assert_eq!(idle_title.spans.len(), 3);
+        assert!(idle_title.spans.iter().all(|span| {
+            span.style.fg == Some(Color::Cyan) && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        app.result_rx = Some(rx);
+        app.working_started_at = Some(Instant::now() - Duration::from_secs(3));
+
+        let running_title = app.composer_panel_title();
+        let running_text = line_to_plain_text(&running_title);
+        assert!(running_text.starts_with(" [ ASK T+"));
+        assert!(running_text.ends_with(" ] "));
+        assert_eq!(running_title.spans.len(), 5);
+        for index in [0, 1, 4] {
+            assert_eq!(running_title.spans[index].style.fg, Some(Color::Cyan));
+            assert!(running_title.spans[index]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD));
+        }
+        assert_eq!(running_title.spans[2].content.as_ref(), " ");
+        assert_eq!(running_title.spans[2].style.fg, None);
+        assert!(!running_title.spans[2]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert!(running_title.spans[3].content.as_ref().starts_with("T+"));
+        assert_eq!(running_title.spans[3].style.fg, Some(Color::Green));
+        assert!(!running_title.spans[3]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+
+        app.result_rx = None;
+        app.working_started_at = None;
+        app.complete_top_level_response("done".to_string(), Duration::from_secs(7));
+        assert_eq!(
+            app.responses.last().and_then(|response| response.duration),
+            Some(Duration::from_secs(7))
+        );
+
+        let idle_again_title = app.composer_panel_title();
+        assert_eq!(line_to_plain_text(&idle_again_title), " [ ASK ] ");
+        assert!(!line_to_plain_text(&idle_again_title).contains("T+"));
+        assert!(idle_again_title.spans.iter().all(|span| {
+            span.style.fg == Some(Color::Cyan) && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn ctrl_p_focuses_prompts_and_unfocus_returns_to_latest() {
         let dir = temp_dir("prompt-focus");
         let mut app = App::new(metadata_for(&dir), &[], false);

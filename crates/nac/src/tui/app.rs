@@ -2184,6 +2184,24 @@ impl App {
         ])
     }
 
+    pub(super) fn composer_panel_title(&self) -> Line<'static> {
+        if self.result_rx.is_none() {
+            return panel_title("ASK");
+        }
+
+        let label_style = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let timer_style = Style::default().fg(Color::Green);
+        let runtime =
+            format_optional_runtime(self.working_started_at.map(|started| started.elapsed()));
+        panel_title_segments(vec![
+            Span::styled("ASK", label_style),
+            Span::raw(" "),
+            Span::styled(runtime, timer_style),
+        ])
+    }
+
     pub(super) fn render_prompt_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let lines = match self
             .displayed_prompt_index()
@@ -2943,7 +2961,7 @@ impl App {
     }
 
     pub(super) fn render_composer(&mut self, frame: &mut ratatui::Frame, area: Rect) {
-        let block = panel_block("ASK");
+        let block = panel_block_with_title(self.composer_panel_title());
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
