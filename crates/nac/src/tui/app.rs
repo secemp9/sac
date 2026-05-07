@@ -10,17 +10,15 @@ pub(super) struct App {
     pub(super) quit: bool,
     pub(super) working_started_at: Option<Instant>,
     pub(super) working_frame: usize,
-    pub(super) last_response_duration: Option<Duration>,
     pub(super) restored_message_count: usize,
     pub(super) last_prompt: Option<String>,
-    pub(super) last_response: Option<String>,
-    pub(super) previous_response: Option<String>,
-    pub(super) previous_response_duration: Option<Duration>,
+    pub(super) responses: Vec<ResponseEntry>,
+    pub(super) selected_response: Option<usize>,
     pub(super) timeline: VecDeque<TimelineEntry>,
     pub(super) threads: HashMap<String, ThreadView>,
     pub(super) all_episodes: HashMap<String, Vec<store::EpisodeRecord>>,
     pub(super) episode_markdown_cache: HashMap<String, Vec<Line<'static>>>,
-    pub(super) response_markdown_cache: Option<(String, usize, Vec<Line<'static>>)>,
+    pub(super) response_markdown_cache: Option<(usize, String, usize, Vec<Line<'static>>)>,
     pub(super) selected_thread: Option<String>,
     pub(super) active_tools: HashMap<String, ActiveTool>,
     pub(super) recent_tools: VecDeque<ToolRecord>,
@@ -73,7 +71,6 @@ impl App {
         panel_scrolls.insert(PanelId::Events, 0);
         panel_scrolls.insert(PanelId::Threads, 0);
         panel_scrolls.insert(PanelId::Response, 0);
-        panel_scrolls.insert(PanelId::PreviousResponse, 0);
         panel_scrolls.insert(PanelId::Workspace, 0);
         panel_scrolls.insert(PanelId::Tools, 0);
         panel_scrolls.insert(PanelId::Worksets, 0);
@@ -91,12 +88,10 @@ impl App {
             quit: false,
             working_started_at: None,
             working_frame: 0,
-            last_response_duration: None,
             restored_message_count: visible_restored_message_count(restored_messages),
             last_prompt: None,
-            last_response: None,
-            previous_response: None,
-            previous_response_duration: None,
+            responses: Vec::new(),
+            selected_response: None,
             timeline: VecDeque::new(),
             threads: HashMap::new(),
             all_episodes: HashMap::new(),
@@ -187,12 +182,15 @@ impl App {
         AppAction::None
     }
 
-    pub(super) fn scroll_reset_state(&self) -> (ScreenMode, bool, Option<String>, usize) {
+    pub(super) fn scroll_reset_state(
+        &self,
+    ) -> (ScreenMode, bool, Option<String>, usize, Option<usize>) {
         (
             self.screen,
             self.help_visible,
             self.selected_thread.clone(),
             self.session_picker.selected,
+            self.selected_response,
         )
     }
 
@@ -272,14 +270,6 @@ impl App {
                 AppAction::None
             }
             KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::PreviousResponse);
-                AppAction::None
-            }
-            KeyEvent {
                 code: KeyCode::Char('t'),
                 modifiers,
                 ..
@@ -314,7 +304,11 @@ impl App {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } if matches!(self.screen, ScreenMode::Focused(_)) => {
-                self.selection = None;
+                if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response)) {
+                    self.select_latest_response();
+                } else {
+                    self.selection = None;
+                }
                 self.screen = ScreenMode::Dashboard;
                 AppAction::None
             }
@@ -338,6 +332,20 @@ impl App {
                 ..
             } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Threads)) => {
                 self.select_next_thread();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Left,
+                ..
+            } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response)) => {
+                self.select_older_response();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Right,
+                ..
+            } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response)) => {
+                self.select_newer_response();
                 AppAction::None
             }
             KeyEvent {
@@ -516,9 +524,11 @@ impl App {
                     tool_calls,
                     ..
                 } if tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) => {
-                    if let Some(previous) = self.last_response.replace(content.clone()) {
-                        self.previous_response = Some(previous);
-                    }
+                    self.responses.push(ResponseEntry {
+                        content: content.clone(),
+                        duration: None,
+                    });
+                    self.selected_response = self.latest_response_index();
                     self.response_markdown_cache = None;
                 }
                 _ => {}
@@ -531,29 +541,26 @@ impl App {
         last_response_duration: Option<Duration>,
         previous_response_duration: Option<Duration>,
     ) {
-        self.last_response_duration = self.last_response.as_ref().and(last_response_duration);
-        self.previous_response_duration = self
-            .previous_response
-            .as_ref()
-            .and(previous_response_duration);
-    }
-
-    pub(super) fn archive_current_response(&mut self) {
-        if let Some(response) = self.last_response.take() {
-            self.previous_response = Some(response);
-            self.previous_response_duration = self.last_response_duration.take();
-            self.response_markdown_cache = None;
-            self.panel_scrolls.insert(PanelId::Response, 0);
-            self.panel_scrolls.insert(PanelId::PreviousResponse, 0);
+        let len = self.responses.len();
+        if let Some(last) = len.checked_sub(1) {
+            self.responses[last].duration = last_response_duration;
+        }
+        if len >= 2 {
+            self.responses[len - 2].duration = previous_response_duration;
         }
     }
 
     pub(super) fn complete_top_level_response(&mut self, content: String, duration: Duration) {
-        self.archive_current_response();
-        self.last_response = Some(content.clone());
-        self.last_response_duration = Some(duration);
+        self.responses.push(ResponseEntry {
+            content: content.clone(),
+            duration: Some(duration),
+        });
+        self.selected_response = self.latest_response_index();
         self.response_markdown_cache = None;
+        self.selection = None;
         self.panel_scrolls.insert(PanelId::Response, 0);
+        self.panel_scrolls
+            .insert(PanelId::CompactStream, usize::MAX);
         self.push_timeline(
             "assistant",
             format!("reply • {}", fit_text(&content, 110)),
@@ -640,12 +647,16 @@ impl App {
     }
 
     pub(super) fn toggle_focus_panel(&mut self, panel: FocusPanel) {
+        let was_response_focused = matches!(self.screen, ScreenMode::Focused(FocusPanel::Response));
         self.selection = None;
         self.screen = match self.screen {
             ScreenMode::Focused(current) if current == panel => ScreenMode::Dashboard,
             _ => {
                 if matches!(panel, FocusPanel::Events) {
                     self.panel_scrolls.insert(PanelId::Events, usize::MAX);
+                }
+                if matches!(panel, FocusPanel::Response) {
+                    self.ensure_selected_response();
                 }
                 if matches!(panel, FocusPanel::Threads) && self.selected_thread.is_none() {
                     let names = self.sorted_thread_names();
@@ -658,12 +669,15 @@ impl App {
                 ScreenMode::Focused(panel)
             }
         };
+        if was_response_focused && !matches!(self.screen, ScreenMode::Focused(FocusPanel::Response))
+        {
+            self.select_latest_response();
+        }
     }
 
     pub(super) fn primary_scroll_panel(&self) -> PanelId {
         match self.screen {
             ScreenMode::Focused(FocusPanel::Events) => PanelId::Events,
-            ScreenMode::Focused(FocusPanel::PreviousResponse) => PanelId::PreviousResponse,
             ScreenMode::Focused(FocusPanel::Threads) => PanelId::ThreadEpisodes,
             ScreenMode::Focused(FocusPanel::Tools) => PanelId::Tools,
             ScreenMode::Focused(FocusPanel::Workspace) => PanelId::Workspace,
@@ -831,7 +845,6 @@ impl App {
     }
 
     pub(super) fn note_prompt_submitted(&mut self, prompt: &str) {
-        self.archive_current_response();
         self.last_prompt = Some(prompt.to_string());
         self.panel_scrolls.insert(PanelId::Prompt, 0);
         self.panel_scrolls
@@ -1118,6 +1131,65 @@ impl App {
         threads.into_iter().map(|t| t.name.clone()).collect()
     }
 
+    pub(super) fn latest_response_index(&self) -> Option<usize> {
+        self.responses.len().checked_sub(1)
+    }
+
+    pub(super) fn ensure_selected_response(&mut self) {
+        match (self.selected_response, self.latest_response_index()) {
+            (_, None) => self.selected_response = None,
+            (Some(selected), Some(latest)) if selected <= latest => {}
+            (_, Some(latest)) => self.selected_response = Some(latest),
+        }
+    }
+
+    pub(super) fn select_latest_response(&mut self) {
+        self.selected_response = self.latest_response_index();
+        self.response_markdown_cache = None;
+        self.selection = None;
+        self.panel_scrolls.insert(PanelId::Response, 0);
+    }
+
+    pub(super) fn displayed_response_index(&self) -> Option<usize> {
+        let latest = self.latest_response_index()?;
+        if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response)) {
+            self.selected_response
+                .filter(|selected| *selected <= latest)
+                .or(Some(latest))
+        } else {
+            Some(latest)
+        }
+    }
+
+    pub(super) fn select_older_response(&mut self) {
+        self.ensure_selected_response();
+        let Some(selected) = self.selected_response else {
+            return;
+        };
+        let new_selected = selected.saturating_sub(1);
+        if new_selected != selected {
+            self.selected_response = Some(new_selected);
+            self.response_markdown_cache = None;
+            self.selection = None;
+            self.panel_scrolls.insert(PanelId::Response, 0);
+        }
+    }
+
+    pub(super) fn select_newer_response(&mut self) {
+        self.ensure_selected_response();
+        let (Some(selected), Some(latest)) = (self.selected_response, self.latest_response_index())
+        else {
+            return;
+        };
+        let new_selected = (selected + 1).min(latest);
+        if new_selected != selected {
+            self.selected_response = Some(new_selected);
+            self.response_markdown_cache = None;
+            self.selection = None;
+            self.panel_scrolls.insert(PanelId::Response, 0);
+        }
+    }
+
     pub(super) fn select_previous_thread(&mut self) {
         let names = self.sorted_thread_names();
         if names.is_empty() {
@@ -1153,14 +1225,23 @@ impl App {
     pub(super) fn displayed_run_duration(&self) -> Option<Duration> {
         self.working_started_at
             .map(|started| started.elapsed())
-            .or(self.last_response_duration)
+            .or_else(|| self.responses.last().and_then(|response| response.duration))
     }
 
     pub(super) fn response_duration_snapshot_ms(&self) -> (Option<u64>, Option<u64>) {
-        (
-            self.last_response_duration.map(duration_to_millis_u64),
-            self.previous_response_duration.map(duration_to_millis_u64),
-        )
+        let last_response_duration = self
+            .responses
+            .last()
+            .and_then(|response| response.duration)
+            .map(duration_to_millis_u64);
+        let previous_response_duration = self
+            .responses
+            .len()
+            .checked_sub(2)
+            .and_then(|index| self.responses.get(index))
+            .and_then(|response| response.duration)
+            .map(duration_to_millis_u64);
+        (last_response_duration, previous_response_duration)
     }
 
     pub(super) fn reset_life(&mut self) {
@@ -1218,9 +1299,6 @@ impl App {
             match panel {
                 FocusPanel::Events => self.render_focused_events(frame, sections[1]),
                 FocusPanel::Response => self.render_focused_response(frame, sections[1]),
-                FocusPanel::PreviousResponse => {
-                    self.render_focused_previous_response(frame, sections[1])
-                }
                 FocusPanel::Threads => self.render_focused_threads(frame, sections[1]),
                 FocusPanel::Tools => self.render_focused_tools(frame, sections[1]),
                 FocusPanel::Workspace => self.render_focused_workspace(frame, sections[1]),
@@ -1277,9 +1355,6 @@ impl App {
             match panel {
                 FocusPanel::Events => self.render_focused_events(frame, sections[1]),
                 FocusPanel::Response => self.render_focused_response(frame, sections[1]),
-                FocusPanel::PreviousResponse => {
-                    self.render_focused_previous_response(frame, sections[1])
-                }
                 FocusPanel::Threads => self.render_focused_threads(frame, sections[1]),
                 FocusPanel::Tools => self.render_focused_tools(frame, sections[1]),
                 FocusPanel::Workspace => self.render_focused_workspace(frame, sections[1]),
@@ -1328,15 +1403,7 @@ impl App {
     }
 
     pub(super) fn render_focused_response(&mut self, frame: &mut ratatui::Frame, area: Rect) {
-        self.render_response_panel(frame, area);
-    }
-
-    pub(super) fn render_focused_previous_response(
-        &mut self,
-        frame: &mut ratatui::Frame,
-        area: Rect,
-    ) {
-        self.render_previous_response_panel(frame, area);
+        self.render_responses_panel(frame, area);
     }
 
     pub(super) fn render_focused_tools(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1391,24 +1458,24 @@ impl App {
             lines.push(render_compact_event_line(&entry, width));
         }
 
-        match self.last_response.as_deref() {
-            Some(response) => {
-                let rendered = match &self.response_markdown_cache {
-                    Some((cached_text, cached_width, cached_lines))
-                        if cached_text == response && *cached_width == width =>
-                    {
-                        cached_lines.clone()
-                    }
-                    _ => {
-                        let rendered = render_markdown_lines(response, Some(width));
-                        self.response_markdown_cache =
-                            Some((response.to_string(), width, rendered.clone()));
-                        rendered
-                    }
-                };
-                lines.extend(rendered);
-            }
-            None => {}
+        if let Some(index) = self.latest_response_index() {
+            let response = self.responses[index].content.clone();
+            let rendered = match &self.response_markdown_cache {
+                Some((cached_index, cached_text, cached_width, cached_lines))
+                    if *cached_index == index
+                        && cached_text == &response
+                        && *cached_width == width =>
+                {
+                    cached_lines.clone()
+                }
+                _ => {
+                    let rendered = render_markdown_lines(&response, Some(width));
+                    self.response_markdown_cache =
+                        Some((index, response.clone(), width, rendered.clone()));
+                    rendered
+                }
+            };
+            lines.extend(rendered);
         }
 
         lines
@@ -1937,14 +2004,12 @@ impl App {
                 Constraint::Length(7),
                 Constraint::Length(6),
                 Constraint::Min(14),
-                Constraint::Length(8),
             ])
             .split(area);
 
         self.render_threads_panel(frame, sections[0]);
         self.render_workspace_panel(frame, sections[1]);
-        self.render_response_panel(frame, sections[2]);
-        self.render_previous_response_panel(frame, sections[3]);
+        self.render_responses_panel(frame, sections[2]);
     }
 
     pub(super) fn render_right_column(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -2026,13 +2091,25 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled(
-                    "Ctrl-T / Ctrl-E / Ctrl-R / Ctrl-P",
+                    "Ctrl-T / Ctrl-E / Ctrl-R",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    " focus threads / events / response / previous",
+                    " focus threads / events / responses",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "← / →",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " older / newer response while focused",
                     Style::default().fg(Color::White),
                 ),
             ]),
@@ -2180,42 +2257,40 @@ impl App {
         render_lines_panel_with_title(frame, area, title, lines);
     }
 
-    pub(super) fn render_response_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+    pub(super) fn render_responses_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let available_width = area.width.saturating_sub(2) as usize;
-        let lines = match self.last_response.as_deref() {
-            Some(response) => match &self.response_markdown_cache {
-                Some((cached_text, cached_width, cached_lines))
-                    if cached_text == response && *cached_width == available_width =>
-                {
-                    cached_lines.clone()
-                }
-                _ => {
-                    let lines = render_markdown_lines(response, Some(available_width));
-                    self.response_markdown_cache =
-                        Some((response.to_string(), available_width, lines.clone()));
-                    lines
-                }
-            },
-            None => vec![Line::from(Span::styled(
+        let displayed_index = self.displayed_response_index();
+        let lines = match displayed_index {
+            Some(index) => self.rendered_response_lines(index, available_width),
+            None if self.result_rx.is_some() => vec![Line::from(Span::styled(
                 "Awaiting orchestrator reply.",
                 Style::default().fg(Color::DarkGray),
             ))],
+            None => vec![Line::from(Span::styled(
+                "No orchestrator replies yet.",
+                Style::default().fg(Color::DarkGray),
+            ))],
         };
-        let runtime_duration = self.displayed_run_duration();
+        let (runtime_duration, runtime_is_live) = self.response_panel_runtime(displayed_index);
         let runtime = format_optional_runtime(runtime_duration);
+        let position = match displayed_index {
+            Some(index) => format!(" {}/{}", index + 1, self.responses.len()),
+            None => " 0/0".to_string(),
+        };
         let title = panel_title_segments(vec![
             Span::styled(
-                "RESPONSE".to_string(),
+                "RESPONSES".to_string(),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(position, Style::default().fg(Color::DarkGray)),
             Span::raw(" "),
             Span::styled(
                 runtime,
                 Style::default().fg(if runtime_duration.is_none() {
                     Color::DarkGray
-                } else if self.result_rx.is_some() {
+                } else if runtime_is_live {
                     Color::Green
                 } else {
                     Color::Yellow
@@ -2225,44 +2300,56 @@ impl App {
         self.render_selectable_rich_panel_with_title(frame, area, PanelId::Response, title, lines);
     }
 
-    pub(super) fn render_previous_response_panel(
+    pub(super) fn rendered_response_lines(
         &mut self,
-        frame: &mut ratatui::Frame,
-        area: Rect,
-    ) {
-        let available_width = area.width.saturating_sub(2) as usize;
-        let lines = match self.previous_response.as_deref() {
-            Some(response) => render_markdown_lines(response, Some(available_width)),
-            None => vec![Line::from(Span::styled(
-                "No previous orchestrator reply yet.",
-                Style::default().fg(Color::DarkGray),
-            ))],
+        index: usize,
+        available_width: usize,
+    ) -> Vec<Line<'static>> {
+        let Some(response) = self
+            .responses
+            .get(index)
+            .map(|response| response.content.clone())
+        else {
+            return Vec::new();
         };
-        let runtime = format_optional_runtime(self.previous_response_duration);
-        let title = panel_title_segments(vec![
-            Span::styled(
-                "PREVIOUS RESPONSE".to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                runtime,
-                Style::default().fg(if self.previous_response_duration.is_some() {
-                    Color::Yellow
-                } else {
-                    Color::DarkGray
-                }),
-            ),
-        ]);
-        self.render_selectable_rich_panel_with_title(
-            frame,
-            area,
-            PanelId::PreviousResponse,
-            title,
-            lines,
-        );
+        match &self.response_markdown_cache {
+            Some((cached_index, cached_text, cached_width, cached_lines))
+                if *cached_index == index
+                    && cached_text == &response
+                    && *cached_width == available_width =>
+            {
+                cached_lines.clone()
+            }
+            _ => {
+                let lines = render_markdown_lines(&response, Some(available_width));
+                self.response_markdown_cache =
+                    Some((index, response, available_width, lines.clone()));
+                lines
+            }
+        }
+    }
+
+    pub(super) fn response_panel_runtime(
+        &self,
+        displayed_index: Option<usize>,
+    ) -> (Option<Duration>, bool) {
+        if let Some(index) = displayed_index {
+            return (
+                self.responses
+                    .get(index)
+                    .and_then(|response| response.duration),
+                false,
+            );
+        }
+
+        if self.result_rx.is_some() {
+            return (
+                self.working_started_at.map(|started| started.elapsed()),
+                true,
+            );
+        }
+
+        (None, false)
     }
 
     pub(super) fn render_focused_threads(&mut self, frame: &mut ratatui::Frame, body: Rect) {

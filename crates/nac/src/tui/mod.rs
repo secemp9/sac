@@ -1005,9 +1005,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_focuses_response_and_escape_returns_dashboard() {
+    fn ctrl_r_focuses_responses_and_unfocus_returns_to_latest() {
         let dir = temp_dir("response-focus");
         let mut app = App::new(metadata_for(&dir), &[], false);
+        app.complete_top_level_response("first reply".to_string(), Duration::from_secs(1));
+        app.complete_top_level_response("second reply".to_string(), Duration::from_secs(2));
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert!(matches!(action, AppAction::None));
@@ -1015,28 +1017,68 @@ mod tests {
             app.screen,
             ScreenMode::Focused(FocusPanel::Response)
         ));
+        assert_eq!(app.displayed_response_index(), Some(1));
 
-        let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.selected_response, Some(0));
+        assert_eq!(app.displayed_response_index(), Some(0));
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert!(matches!(action, AppAction::None));
         assert_eq!(app.screen, ScreenMode::Dashboard);
+        assert_eq!(app.selected_response, Some(1));
+        assert_eq!(app.displayed_response_index(), Some(1));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn ctrl_p_focuses_previous_response_and_escape_returns_dashboard() {
-        let dir = temp_dir("previous-response-focus");
+    fn ctrl_o_still_focuses_tools() {
+        let dir = temp_dir("tools-focus");
         let mut app = App::new(metadata_for(&dir), &[], false);
 
-        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(matches!(action, AppAction::None));
-        assert!(matches!(
-            app.screen,
-            ScreenMode::Focused(FocusPanel::PreviousResponse)
-        ));
+        assert!(matches!(app.screen, ScreenMode::Focused(FocusPanel::Tools)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
-        let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    #[test]
+    fn focused_response_left_right_navigates_history_and_resets_scroll() {
+        let dir = temp_dir("response-history-nav");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.complete_top_level_response("one".to_string(), Duration::from_secs(1));
+        app.complete_top_level_response("two".to_string(), Duration::from_secs(2));
+        app.complete_top_level_response("three".to_string(), Duration::from_secs(3));
+        app.screen = ScreenMode::Focused(FocusPanel::Response);
+        app.panel_scrolls.insert(PanelId::Response, 12);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert!(matches!(action, AppAction::None));
-        assert_eq!(app.screen, ScreenMode::Dashboard);
+        assert_eq!(app.selected_response, Some(1));
+        assert_eq!(app.panel_scrolls.get(&PanelId::Response), Some(&0));
+        assert_eq!(app.displayed_response_index(), Some(1));
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.selected_response, Some(0));
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.selected_response, Some(0));
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.selected_response, Some(1));
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.selected_response, Some(2));
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(app.selected_response, Some(2));
+
+        app.screen = ScreenMode::Dashboard;
+        app.selected_response = Some(0);
+        assert_eq!(app.displayed_response_index(), Some(2));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1139,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn response_runtime_tracks_placeholder_current_previous_and_ignored_event() {
+    fn response_history_tracks_runtime_snapshots_and_ignored_event() {
         let dir = temp_dir("response-runtime");
         let mut app = App::new(metadata_for(&dir), &[], false);
 
@@ -1147,39 +1189,49 @@ mod tests {
             format_optional_runtime(app.displayed_run_duration()),
             "T+--:--:--"
         );
-        assert_eq!(
-            format_optional_runtime(app.previous_response_duration),
-            "T+--:--:--"
-        );
+        assert_eq!(app.response_duration_snapshot_ms(), (None, None));
 
         app.apply_agent_event(AgentEvent::AssistantMessage {
             thread_name: None,
             content: "ignored".to_string(),
         });
-        assert_eq!(app.last_response, None);
+        assert!(app.responses.is_empty());
+
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        app.result_rx = Some(rx);
+        app.working_started_at = Some(Instant::now() - Duration::from_secs(3));
+        let (runtime, is_live) = app.response_panel_runtime(None);
+        assert!(runtime.is_some());
+        assert!(is_live);
+        app.result_rx = None;
+        app.working_started_at = None;
 
         app.complete_top_level_response("first reply".to_string(), Duration::from_secs(1));
-        assert_eq!(app.last_response.as_deref(), Some("first reply"));
-        assert_eq!(app.last_response_duration, Some(Duration::from_secs(1)));
-        assert_eq!(app.previous_response, None);
+        assert_eq!(app.responses.len(), 1);
+        assert_eq!(app.responses[0].content, "first reply");
+        assert_eq!(app.responses[0].duration, Some(Duration::from_secs(1)));
+        assert_eq!(app.selected_response, Some(0));
+        assert_eq!(app.response_duration_snapshot_ms(), (Some(1_000), None));
 
         app.note_prompt_submitted("second prompt");
-        assert_eq!(app.last_response, None);
-        assert_eq!(app.last_response_duration, None);
-        assert_eq!(app.previous_response.as_deref(), Some("first reply"));
-        assert_eq!(app.previous_response_duration, Some(Duration::from_secs(1)));
+        assert_eq!(app.responses.len(), 1);
+        assert_eq!(app.displayed_response_index(), Some(0));
 
         app.complete_top_level_response("second reply".to_string(), Duration::from_secs(2));
-        assert_eq!(app.last_response.as_deref(), Some("second reply"));
-        assert_eq!(app.last_response_duration, Some(Duration::from_secs(2)));
-        assert_eq!(app.previous_response.as_deref(), Some("first reply"));
-        assert_eq!(app.previous_response_duration, Some(Duration::from_secs(1)));
+        assert_eq!(app.responses.len(), 2);
+        assert_eq!(app.responses[1].content, "second reply");
+        assert_eq!(app.responses[1].duration, Some(Duration::from_secs(2)));
+        assert_eq!(app.selected_response, Some(1));
+        assert_eq!(
+            app.response_duration_snapshot_ms(),
+            (Some(2_000), Some(1_000))
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn response_durations_restore_with_hydrated_responses() {
+    fn response_durations_restore_with_hydrated_response_history() {
         let dir = temp_dir("response-runtime-hydrate");
         let metadata = metadata_for(&dir);
         let messages = vec![
@@ -1190,20 +1242,45 @@ mod tests {
                 tool_calls: None,
             },
             Message::Assistant {
+                content: Some("tool call carrier".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: Some(vec![crate::types::ToolCall {
+                    id: "call-1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::types::FunctionCall {
+                        name: "read".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+            },
+            Message::Assistant {
                 content: Some("second reply".to_string()),
                 reasoning_text: None,
                 reasoning_details: None,
                 tool_calls: None,
+            },
+            Message::Assistant {
+                content: Some("third reply".to_string()),
+                reasoning_text: None,
+                reasoning_details: None,
+                tool_calls: Some(Vec::new()),
             },
         ];
 
         let mut app = App::new_with_mode(metadata, &messages, false, UiMode::Full);
         app.restore_response_durations(Some(Duration::from_secs(9)), Some(Duration::from_secs(4)));
 
-        assert_eq!(app.last_response.as_deref(), Some("second reply"));
-        assert_eq!(app.last_response_duration, Some(Duration::from_secs(9)));
-        assert_eq!(app.previous_response.as_deref(), Some("first reply"));
-        assert_eq!(app.previous_response_duration, Some(Duration::from_secs(4)));
+        let contents = app
+            .responses
+            .iter()
+            .map(|response| response.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(contents, vec!["first reply", "second reply", "third reply"]);
+        assert_eq!(app.responses[0].duration, None);
+        assert_eq!(app.responses[1].duration, Some(Duration::from_secs(4)));
+        assert_eq!(app.responses[2].duration, Some(Duration::from_secs(9)));
+        assert_eq!(app.selected_response, Some(2));
 
         let _ = std::fs::remove_dir_all(dir);
     }
