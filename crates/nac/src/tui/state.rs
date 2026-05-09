@@ -80,9 +80,12 @@ pub(super) enum PanelId {
     Events,
     Threads,
     Response,
+    PreviousResponse,
     Workspace,
     Tools,
+    Terminals,
     Worksets,
+    FileChanges,
     ThreadList,
     ThreadEpisodes,
     CompactStream,
@@ -164,6 +167,23 @@ pub(super) struct WorkspaceSnapshot {
 #[derive(Debug, Clone, Default)]
 pub(super) struct WorksetSnapshot {
     pub(super) items: Vec<store::WorksetRecord>,
+    pub(super) error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct TerminalDisplayInfo {
+    pub(super) thread_name: Option<String>,
+    pub(super) name: String,
+    pub(super) command_state: crate::terminal::CommandState,
+    pub(super) current_command: Option<String>,
+    pub(super) last_exit_code: Option<i32>,
+    pub(super) idle_ms: u64,
+    pub(super) age_ms: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct TerminalsSnapshot {
+    pub(super) terminals: Vec<TerminalDisplayInfo>,
     pub(super) error: Option<String>,
 }
 
@@ -348,10 +368,13 @@ pub(super) enum FocusPanel {
     Prompt,
     Events,
     Response,
+    PreviousResponse,
     Threads,
     Tools,
+    Terminals,
     Workspace,
     Worksets,
+    FileChanges,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

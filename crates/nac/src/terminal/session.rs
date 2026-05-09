@@ -13,24 +13,30 @@ use tokio::sync::Notify;
 
 use crate::sandbox::SandboxSession;
 
+use super::CommandState;
+
 const MAX_SESSION_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_HISTORY_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct TerminalSession {
     pub name: String,
     writer: Box<dyn Write + Send>,
-    output: Arc<StdMutex<OutputBuffer>>,
+    output: Arc<StdMutex<OutputBuffers>>,
     output_notify: Arc<Notify>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     _pty_pair: portable_pty::PtyPair,
     _reader_thread: std::thread::JoinHandle<()>,
     pub created_at: Instant,
-    pub last_output_at: Instant,
+    last_output_at: Arc<StdMutex<Instant>>,
     alive: Arc<AtomicBool>,
     exit_code: Option<i32>,
     sandbox_cleanup: Option<(SandboxSession, String)>,
     pub cwd: PathBuf,
     pub cols: u16,
     pub rows: u16,
+    command_state: CommandState,
+    current_command: Option<String>,
+    last_command_exit_code: Option<i32>,
 }
 
 impl TerminalSession {
@@ -98,10 +104,15 @@ impl TerminalSession {
 
         let alive = Arc::new(AtomicBool::new(true));
         let alive_clone = alive.clone();
-        let output = Arc::new(StdMutex::new(OutputBuffer::new(MAX_SESSION_OUTPUT_BYTES)));
+        let output = Arc::new(StdMutex::new(OutputBuffers::new(
+            MAX_SESSION_OUTPUT_BYTES,
+            MAX_HISTORY_OUTPUT_BYTES,
+        )));
         let output_clone = output.clone();
         let notify = Arc::new(Notify::new());
         let notify_clone = notify.clone();
+        let last_output_at = Arc::new(StdMutex::new(Instant::now()));
+        let last_output_at_clone = last_output_at.clone();
 
         let reader_thread = std::thread::spawn(move || {
             let mut reader = reader;
@@ -116,6 +127,9 @@ impl TerminalSession {
                     Ok(n) => {
                         if let Ok(mut output) = output_clone.lock() {
                             output.push(&buf[..n]);
+                        }
+                        if let Ok(mut instant) = last_output_at_clone.lock() {
+                            *instant = Instant::now();
                         }
                         notify_clone.notify_one();
                     }
@@ -132,13 +146,16 @@ impl TerminalSession {
             _pty_pair: pty_pair,
             _reader_thread: reader_thread,
             created_at: Instant::now(),
-            last_output_at: Instant::now(),
+            last_output_at,
             alive,
             exit_code: None,
             sandbox_cleanup,
             cwd: resolved_cwd,
             cols,
             rows,
+            command_state: CommandState::Idle,
+            current_command: None,
+            last_command_exit_code: None,
         })
     }
 
@@ -147,7 +164,12 @@ impl TerminalSession {
             .write_all(data)
             .context("Failed to write to PTY")?;
         self.writer.flush().context("Failed to flush PTY")?;
-        self.last_output_at = Instant::now();
+        let trimmed = String::from_utf8_lossy(data).trim().to_string();
+        if !trimmed.is_empty() {
+            self.current_command = Some(trimmed);
+            self.command_state = CommandState::Running;
+            self.last_command_exit_code = None;
+        }
         Ok(())
     }
 
@@ -155,13 +177,27 @@ impl TerminalSession {
         let buf = self
             .output
             .lock()
-            .map(|mut output| output.take())
+            .map(|mut output| output.take_delta())
             .unwrap_or_default();
         if buf.is_empty() {
             return String::new();
         }
-        self.last_output_at = Instant::now();
         String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    pub fn read_history(&self) -> String {
+        let buf = self
+            .output
+            .lock()
+            .map(|output| output.history_snapshot())
+            .unwrap_or_default();
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    pub fn touch_output_activity(&self) {
+        if let Ok(mut instant) = self.last_output_at.lock() {
+            *instant = Instant::now();
+        }
     }
 
     pub fn output_notify(&self) -> &Arc<Notify> {
@@ -180,6 +216,8 @@ impl TerminalSession {
 
         if let Ok(Some(status)) = self.child.try_wait() {
             self.exit_code = Some(status.exit_code() as i32);
+            self.last_command_exit_code = self.exit_code;
+            self.command_state = CommandState::Completed;
             self.alive.store(false, Ordering::SeqCst);
         }
     }
@@ -189,7 +227,48 @@ impl TerminalSession {
     }
 
     pub fn idle_duration(&self) -> Duration {
-        self.last_output_at.elapsed()
+        self.last_output_at
+            .lock()
+            .map(|instant| instant.elapsed())
+            .unwrap_or(Duration::ZERO)
+    }
+
+    pub fn age(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+
+    pub fn command_state(&self) -> CommandState {
+        self.command_state
+    }
+
+    pub fn current_command(&self) -> Option<String> {
+        self.current_command.clone()
+    }
+
+    pub fn last_command_exit_code(&self) -> Option<i32> {
+        self.last_command_exit_code
+    }
+
+    pub fn reset_command_state(&mut self) {
+        if self.command_state == CommandState::Completed {
+            self.command_state = CommandState::Idle;
+            self.current_command = None;
+        }
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self._pty_pair
+            .master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("Failed to resize PTY")?;
+        self.cols = cols;
+        self.rows = rows;
+        Ok(())
     }
 
     pub fn pid(&self) -> Option<u32> {
@@ -213,7 +292,6 @@ impl TerminalSession {
         #[cfg(unix)]
         {
             signal_pids(&descendants, libc::SIGKILL);
-            self.signal_descendants(libc::SIGKILL);
             self.signal_process_group(libc::SIGKILL);
         }
 
@@ -240,14 +318,6 @@ impl TerminalSession {
         };
         descendant_pids(pid as libc::pid_t)
     }
-
-    #[cfg(unix)]
-    fn signal_descendants(&self, signal: libc::c_int) {
-        signal_pids(&self.child_descendant_pids(), signal);
-    }
-
-    #[cfg(not(unix))]
-    fn signal_descendants(&self, _signal: i32) {}
 
     #[cfg(unix)]
     fn signal_process_group(&self, signal: libc::c_int) {
@@ -292,11 +362,6 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.writer.flush();
-        #[cfg(unix)]
-        {
-            self.signal_descendants(libc::SIGTERM);
-            self.signal_process_group(libc::SIGTERM);
-        }
         self.alive.store(false, Ordering::SeqCst);
     }
 }
@@ -453,13 +518,40 @@ pub(crate) fn terminal_env_owned() -> Vec<(String, String)> {
         .collect()
 }
 
-struct OutputBuffer {
+struct OutputBuffers {
+    delta: BoundedBuffer,
+    history: BoundedBuffer,
+}
+
+impl OutputBuffers {
+    fn new(delta_capacity: usize, history_capacity: usize) -> Self {
+        Self {
+            delta: BoundedBuffer::new(delta_capacity),
+            history: BoundedBuffer::new(history_capacity),
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        self.delta.push(chunk);
+        self.history.push(chunk);
+    }
+
+    fn take_delta(&mut self) -> Vec<u8> {
+        self.delta.take_all()
+    }
+
+    fn history_snapshot(&self) -> Vec<u8> {
+        self.history.snapshot()
+    }
+}
+
+struct BoundedBuffer {
     bytes: VecDeque<u8>,
     capacity: usize,
     dropped_bytes: usize,
 }
 
-impl OutputBuffer {
+impl BoundedBuffer {
     fn new(capacity: usize) -> Self {
         Self {
             bytes: VecDeque::with_capacity(capacity.min(8192)),
@@ -501,7 +593,18 @@ impl OutputBuffer {
         self.bytes.extend(chunk.iter().copied());
     }
 
-    fn take(&mut self) -> Vec<u8> {
+    fn snapshot(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.dropped_bytes > 0 {
+            out.extend_from_slice(
+                format!("\n...[{} bytes omitted]...\n", self.dropped_bytes).as_bytes(),
+            );
+        }
+        out.extend(self.bytes.iter().copied());
+        out
+    }
+
+    fn take_all(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
         if self.dropped_bytes > 0 {
             out.extend_from_slice(
@@ -523,36 +626,27 @@ mod tests {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
-    #[cfg(unix)]
-    fn parse_child_pid(output: &str) -> Option<u32> {
-        output.lines().find_map(|line| {
-            line.split_once("NAC_CHILD:").and_then(|(_, rest)| {
-                rest.chars()
-                    .take_while(|ch| ch.is_ascii_digit())
-                    .collect::<String>()
-                    .parse()
-                    .ok()
-            })
-        })
-    }
-
     #[tokio::test]
     #[cfg(unix)]
     async fn kill_removes_background_jobs_from_pty_shell() {
         let mut session = TerminalSession::spawn("test".to_string(), None, 120, 40, None).unwrap();
-        session.write(b"sleep 30 & echo NAC_CHILD:$!\r").unwrap();
+        session
+            .write(&crate::terminal::parse_keys("sleep 30 &<RET>"))
+            .unwrap();
 
-        let mut output = String::new();
         let mut child_pid = None;
         for _ in 0..40 {
-            output.push_str(&session.read_output());
-            child_pid = parse_child_pid(&output);
+            child_pid = session
+                .child_descendant_pids()
+                .into_iter()
+                .find(|pid| Some(*pid as u32) != session.pid())
+                .map(|pid| pid as u32);
             if child_pid.is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        let child_pid = child_pid.unwrap_or_else(|| panic!("child pid not found in: {output:?}"));
+        let child_pid = child_pid.unwrap_or_else(|| panic!("no descendant pid found"));
         assert!(
             process_exists(child_pid),
             "background child exited too early"

@@ -24,6 +24,7 @@ pub(super) struct App {
     pub(super) active_tools: HashMap<String, ActiveTool>,
     pub(super) recent_tools: VecDeque<ToolRecord>,
     pub(super) workspace: WorkspaceSnapshot,
+    pub(super) terminals: TerminalsSnapshot,
     pub(super) worksets: WorksetSnapshot,
     pub(super) last_workspace_refresh_at: Instant,
     pub(super) workspace_tx: Option<mpsc::Sender<WorkspaceSnapshot>>,
@@ -65,6 +66,7 @@ impl App {
     ) -> Self {
         let inspect_root = metadata.workspace_host_path.clone();
         let workspace = WorkspaceSnapshot::load(&metadata.cwd, inspect_root.as_deref());
+        let terminals = TerminalsSnapshot::default();
         let worksets = WorksetSnapshot::load(&metadata.store_path, metadata.session_id.as_deref());
 
         let mut panel_scrolls = HashMap::new();
@@ -72,9 +74,12 @@ impl App {
         panel_scrolls.insert(PanelId::Events, 0);
         panel_scrolls.insert(PanelId::Threads, 0);
         panel_scrolls.insert(PanelId::Response, 0);
+        panel_scrolls.insert(PanelId::PreviousResponse, 0);
         panel_scrolls.insert(PanelId::Workspace, 0);
         panel_scrolls.insert(PanelId::Tools, 0);
+        panel_scrolls.insert(PanelId::Terminals, 0);
         panel_scrolls.insert(PanelId::Worksets, 0);
+        panel_scrolls.insert(PanelId::FileChanges, 0);
         panel_scrolls.insert(PanelId::ThreadList, 0);
         panel_scrolls.insert(PanelId::ThreadEpisodes, 0);
         panel_scrolls.insert(PanelId::CompactStream, usize::MAX);
@@ -103,6 +108,7 @@ impl App {
             active_tools: HashMap::new(),
             recent_tools: VecDeque::new(),
             workspace,
+            terminals,
             worksets,
             last_workspace_refresh_at: Instant::now(),
             workspace_tx: None,
@@ -280,6 +286,78 @@ impl App {
                 AppAction::None
             }
             KeyEvent {
+                code: KeyCode::Char('1'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::Prompt);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('2'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::Events);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('3'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::Threads);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('4'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::Response);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('5'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::PreviousResponse);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('6'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::Tools);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('7'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::Terminals);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('8'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::Worksets);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('9'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::FileChanges);
+                AppAction::None
+            }
+            KeyEvent {
                 code: KeyCode::Char('p'),
                 modifiers,
                 ..
@@ -320,6 +398,30 @@ impl App {
                 AppAction::None
             }
             KeyEvent {
+                code: KeyCode::Char('g'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::PreviousResponse);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('l'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::Terminals);
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('f'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toggle_focus_panel(FocusPanel::FileChanges);
+                AppAction::None
+            }
+            KeyEvent {
                 code: KeyCode::Esc, ..
             } if matches!(self.screen, ScreenMode::Focused(_)) => {
                 if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response)) {
@@ -335,36 +437,58 @@ impl App {
             // Navigation in focused Threads mode
             KeyEvent {
                 code: KeyCode::Up, ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('k'),
-                ..
             } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Threads)) => {
+                self.select_previous_thread();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers,
+                ..
+            } if modifiers == KeyModifiers::NONE
+                && matches!(self.screen, ScreenMode::Focused(FocusPanel::Threads)) =>
+            {
                 self.select_previous_thread();
                 AppAction::None
             }
             KeyEvent {
                 code: KeyCode::Down,
                 ..
-            }
-            | KeyEvent {
-                code: KeyCode::Char('j'),
-                ..
             } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Threads)) => {
+                self.select_next_thread();
+                AppAction::None
+            }
+            KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers,
+                ..
+            } if modifiers == KeyModifiers::NONE
+                && matches!(self.screen, ScreenMode::Focused(FocusPanel::Threads)) =>
+            {
                 self.select_next_thread();
                 AppAction::None
             }
             KeyEvent {
                 code: KeyCode::Left,
                 ..
-            } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response)) => {
+            } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response))
+                || matches!(
+                    self.screen,
+                    ScreenMode::Focused(FocusPanel::PreviousResponse)
+                ) =>
+            {
                 self.select_older_response();
                 AppAction::None
             }
             KeyEvent {
                 code: KeyCode::Right,
                 ..
-            } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response)) => {
+            } if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response))
+                || matches!(
+                    self.screen,
+                    ScreenMode::Focused(FocusPanel::PreviousResponse)
+                ) =>
+            {
                 self.select_newer_response();
                 AppAction::None
             }
@@ -721,6 +845,10 @@ impl App {
                 if matches!(panel, FocusPanel::Response) {
                     self.ensure_selected_response();
                 }
+                if matches!(panel, FocusPanel::PreviousResponse) {
+                    self.ensure_selected_response();
+                    self.panel_scrolls.insert(PanelId::PreviousResponse, 0);
+                }
                 if matches!(panel, FocusPanel::Threads) && self.selected_thread.is_none() {
                     let names = self.sorted_thread_names();
                     if !names.is_empty() {
@@ -746,9 +874,12 @@ impl App {
             ScreenMode::Focused(FocusPanel::Prompt) => PanelId::Prompt,
             ScreenMode::Focused(FocusPanel::Events) => PanelId::Events,
             ScreenMode::Focused(FocusPanel::Threads) => PanelId::ThreadEpisodes,
+            ScreenMode::Focused(FocusPanel::PreviousResponse) => PanelId::PreviousResponse,
             ScreenMode::Focused(FocusPanel::Tools) => PanelId::Tools,
+            ScreenMode::Focused(FocusPanel::Terminals) => PanelId::Terminals,
             ScreenMode::Focused(FocusPanel::Workspace) => PanelId::Workspace,
             ScreenMode::Focused(FocusPanel::Worksets) => PanelId::Worksets,
+            ScreenMode::Focused(FocusPanel::FileChanges) => PanelId::FileChanges,
             ScreenMode::Dashboard if matches!(self.ui_mode, UiMode::Compact) => {
                 PanelId::CompactStream
             }
@@ -1069,6 +1200,12 @@ impl App {
             AgentEvent::ThreadLog { name, line } => {
                 self.push_timeline(name, format!("log • {}", fit_text(&line, 110)), Tone::Muted);
             }
+            AgentEvent::TerminalSnapshot {
+                thread_name,
+                terminals,
+            } => {
+                self.update_terminals(thread_name, terminals);
+            }
             AgentEvent::ThreadFinished {
                 name,
                 exit_code,
@@ -1289,6 +1426,60 @@ impl App {
         }
     }
 
+    pub(super) fn displayed_previous_response_index(&self) -> Option<usize> {
+        let latest = self.latest_response_index()?;
+        if latest == 0 {
+            return None;
+        }
+
+        let anchor = if matches!(self.screen, ScreenMode::Focused(FocusPanel::Response))
+            || matches!(
+                self.screen,
+                ScreenMode::Focused(FocusPanel::PreviousResponse)
+            ) {
+            self.selected_response
+                .filter(|selected| *selected <= latest)
+                .unwrap_or(latest)
+        } else {
+            latest
+        };
+
+        anchor.checked_sub(1)
+    }
+
+    pub(super) fn update_terminals(
+        &mut self,
+        thread_name: Option<String>,
+        terminals: Vec<crate::terminal::TerminalInfo>,
+    ) {
+        for terminal in terminals {
+            let display = TerminalDisplayInfo {
+                thread_name: thread_name.clone(),
+                name: terminal.name,
+                command_state: terminal.command_state,
+                current_command: terminal.current_command,
+                last_exit_code: terminal.last_exit_code,
+                idle_ms: terminal.idle_ms,
+                age_ms: terminal.age_ms,
+            };
+
+            if let Some(existing) = self
+                .terminals
+                .terminals
+                .iter_mut()
+                .find(|entry| entry.name == display.name)
+            {
+                *existing = display;
+            } else {
+                self.terminals.terminals.push(display);
+            }
+        }
+        self.terminals
+            .terminals
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        self.terminals.error = None;
+    }
+
     pub(super) fn select_older_response(&mut self) {
         self.ensure_selected_response();
         let Some(selected) = self.selected_response else {
@@ -1300,6 +1491,7 @@ impl App {
             self.response_markdown_cache = None;
             self.selection = None;
             self.panel_scrolls.insert(PanelId::Response, 0);
+            self.panel_scrolls.insert(PanelId::PreviousResponse, 0);
         }
     }
 
@@ -1315,6 +1507,7 @@ impl App {
             self.response_markdown_cache = None;
             self.selection = None;
             self.panel_scrolls.insert(PanelId::Response, 0);
+            self.panel_scrolls.insert(PanelId::PreviousResponse, 0);
         }
     }
 
@@ -1435,10 +1628,15 @@ impl App {
                 FocusPanel::Prompt => self.render_focused_prompt(frame, sections[1]),
                 FocusPanel::Events => self.render_focused_events(frame, sections[1]),
                 FocusPanel::Response => self.render_focused_response(frame, sections[1]),
+                FocusPanel::PreviousResponse => {
+                    self.render_focused_previous_response(frame, sections[1])
+                }
                 FocusPanel::Threads => self.render_focused_threads(frame, sections[1]),
                 FocusPanel::Tools => self.render_focused_tools(frame, sections[1]),
+                FocusPanel::Terminals => self.render_focused_terminals(frame, sections[1]),
                 FocusPanel::Workspace => self.render_focused_workspace(frame, sections[1]),
                 FocusPanel::Worksets => self.render_focused_worksets(frame, sections[1]),
+                FocusPanel::FileChanges => self.render_focused_file_changes(frame, sections[1]),
             }
             self.render_composer(frame, sections[2]);
             if self.help_visible {
@@ -1492,10 +1690,15 @@ impl App {
                 FocusPanel::Prompt => self.render_focused_prompt(frame, sections[1]),
                 FocusPanel::Events => self.render_focused_events(frame, sections[1]),
                 FocusPanel::Response => self.render_focused_response(frame, sections[1]),
+                FocusPanel::PreviousResponse => {
+                    self.render_focused_previous_response(frame, sections[1])
+                }
                 FocusPanel::Threads => self.render_focused_threads(frame, sections[1]),
                 FocusPanel::Tools => self.render_focused_tools(frame, sections[1]),
+                FocusPanel::Terminals => self.render_focused_terminals(frame, sections[1]),
                 FocusPanel::Workspace => self.render_focused_workspace(frame, sections[1]),
                 FocusPanel::Worksets => self.render_focused_worksets(frame, sections[1]),
+                FocusPanel::FileChanges => self.render_focused_file_changes(frame, sections[1]),
             }
         } else {
             self.render_compact_stream(frame, sections[1]);
@@ -1547,8 +1750,20 @@ impl App {
         self.render_responses_panel(frame, area);
     }
 
+    pub(super) fn render_focused_previous_response(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+    ) {
+        self.render_previous_response_panel(frame, area);
+    }
+
     pub(super) fn render_focused_tools(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         self.render_tools_panel(frame, area);
+    }
+
+    pub(super) fn render_focused_terminals(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        self.render_terminals_panel(frame, area);
     }
 
     pub(super) fn render_focused_workspace(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -1563,6 +1778,10 @@ impl App {
 
     pub(super) fn render_focused_worksets(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         self.render_worksets_panel(frame, area);
+    }
+
+    pub(super) fn render_focused_file_changes(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        self.render_file_changes_panel(frame, area);
     }
 
     pub(super) fn render_compact_stream(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -2158,14 +2377,16 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(7),
-                Constraint::Min(8),
+                Constraint::Length(7),
+                Constraint::Min(6),
                 Constraint::Length(9),
             ])
             .split(area);
 
         self.render_tools_panel(frame, sections[0]);
-        self.render_worksets_panel(frame, sections[1]);
-        self.render_file_changes_panel(frame, sections[2]);
+        self.render_terminals_panel(frame, sections[1]);
+        self.render_worksets_panel(frame, sections[2]);
+        self.render_file_changes_panel(frame, sections[3]);
     }
 
     pub(super) fn prompt_panel_title(&self) -> Line<'static> {
@@ -2277,6 +2498,30 @@ impl App {
                 ),
                 Span::styled(
                     " focus threads / events / prompts / responses",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Ctrl-G / Ctrl-L / Ctrl-F",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " focus previous / terminals / file changes",
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Ctrl-1…Ctrl-9",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " direct numeric pane focus",
                     Style::default().fg(Color::White),
                 ),
             ]),
@@ -2477,6 +2722,41 @@ impl App {
             ),
         ]);
         self.render_selectable_rich_panel_with_title(frame, area, PanelId::Response, title, lines);
+    }
+
+    pub(super) fn render_previous_response_panel(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+    ) {
+        let available_width = area.width.saturating_sub(2) as usize;
+        let displayed_index = self.displayed_previous_response_index();
+        let lines = match displayed_index {
+            Some(index) => self.rendered_response_lines(index, available_width),
+            None => vec![Line::from(Span::styled(
+                "No previous orchestrator reply yet.",
+                Style::default().fg(Color::DarkGray),
+            ))],
+        };
+        let title = panel_title_segments(vec![
+            Span::styled(
+                "PREVIOUS".to_string(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(match displayed_index {
+                Some(index) => format!(" {}/{}", index + 1, self.responses.len()),
+                None => format!(" 0/{}", self.responses.len()),
+            }),
+        ]);
+        self.render_selectable_rich_panel_with_title(
+            frame,
+            area,
+            PanelId::PreviousResponse,
+            title,
+            lines,
+        );
     }
 
     pub(super) fn rendered_response_lines(
@@ -2837,6 +3117,75 @@ impl App {
         }
 
         self.render_scrollable_lines_panel(frame, area, PanelId::Tools, "TOOLS", lines);
+    }
+
+    pub(super) fn render_terminals_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        let width = inner_width(area);
+        let mut lines = Vec::new();
+
+        if let Some(error) = self.terminals.error.as_deref() {
+            lines.push(Line::from(Span::styled(
+                fit_text(error, width),
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else if self.terminals.terminals.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No terminals yet. Use exec_command tty=true or the terminal tool.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for terminal in &self.terminals.terminals {
+                let state_label = match terminal.command_state {
+                    crate::terminal::CommandState::Idle => "IDLE",
+                    crate::terminal::CommandState::Running => "RUN",
+                    crate::terminal::CommandState::Completed => "DONE",
+                };
+                let tone = match terminal.command_state {
+                    crate::terminal::CommandState::Idle => Tone::Muted,
+                    crate::terminal::CommandState::Running => Tone::Success,
+                    crate::terminal::CommandState::Completed => Tone::Warning,
+                };
+                let header = format!(
+                    "{} {}  idle={}ms age={}ms",
+                    state_label,
+                    fit_text(&terminal.name, width.saturating_sub(24).max(8)),
+                    terminal.idle_ms,
+                    terminal.age_ms
+                );
+                lines.push(Line::from(vec![
+                    status_span(state_label, tone),
+                    Span::raw(format!(
+                        " {}",
+                        fit_text(
+                            &header[state_label.len()..],
+                            width.saturating_sub(state_label.len() + 1)
+                        )
+                    )),
+                ]));
+
+                if let Some(thread_name) = terminal.thread_name.as_deref() {
+                    lines.push(Line::from(Span::styled(
+                        fit_text(&format!("  worker {}", thread_name), width),
+                        Style::default().fg(Color::Gray),
+                    )));
+                }
+
+                if let Some(command) = terminal.current_command.as_deref() {
+                    lines.push(Line::from(Span::styled(
+                        fit_text(&format!("  {}", command), width),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                if let Some(exit_code) = terminal.last_exit_code {
+                    lines.push(Line::from(Span::styled(
+                        fit_text(&format!("  exit {}", exit_code), width),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+        }
+
+        self.render_scrollable_lines_panel(frame, area, PanelId::Terminals, "TERMINALS", lines);
     }
 
     pub(super) fn render_worksets_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {

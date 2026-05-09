@@ -4,7 +4,7 @@ use super::*;
 #[command(
     name = "nac",
     about = "agent",
-    after_help = "Commands:\n  nac resume [SESSION_ID]    Continue a saved session\n  nac codex-auth [COMMAND]   Manage ChatGPT Codex auth\n  nac upgrade                Reinstall the latest nac release"
+    after_help = "Commands:\n  nac resume [SESSION_ID]    Continue a saved session\n  nac config [COMMAND]       Manage nac configuration\n  nac codex-auth [COMMAND]   Manage ChatGPT Codex auth\n  nac upgrade                Reinstall the latest nac release"
 )]
 pub(super) struct RunCli {
     /// Working directory (default: current directory)
@@ -161,6 +161,25 @@ pub(super) struct ResumeCli {
 }
 
 #[derive(Parser)]
+#[command(name = "nac config", about = "manage nac configuration")]
+pub(super) struct ConfigCli {
+    #[command(subcommand)]
+    pub(super) command: Option<ConfigCommand>,
+}
+
+#[derive(Subcommand)]
+pub(super) enum ConfigCommand {
+    /// Create a sample config file if missing
+    Init,
+    /// Print the config file path
+    Path,
+    /// Print the current config file contents
+    Show,
+    /// Reload and validate configuration for this invocation
+    Reload,
+}
+
+#[derive(Parser)]
 #[command(name = "nac codex-auth", about = "manage ChatGPT Codex auth")]
 pub(super) struct CodexAuthCli {
     #[command(subcommand)]
@@ -189,6 +208,7 @@ pub(super) enum ParsedCli {
     Run(RunCli),
     ManagedWorker(ManagedWorkerCli),
     Resume(ResumeCli),
+    Config(ConfigCli),
     CodexAuth(CodexAuthCli),
     Upgrade(UpgradeCli),
 }
@@ -223,6 +243,14 @@ pub(super) fn parse_cli_from(args: Vec<OsString>) -> ParsedCli {
         codex_auth_args.push(OsString::from("nac codex-auth"));
         codex_auth_args.extend(args.into_iter().skip(2));
         ParsedCli::CodexAuth(CodexAuthCli::parse_from(codex_auth_args))
+    } else if args
+        .get(1)
+        .is_some_and(|value| value == OsStr::new("config"))
+    {
+        let mut config_args = Vec::with_capacity(args.len().saturating_sub(1));
+        config_args.push(OsString::from("nac config"));
+        config_args.extend(args.into_iter().skip(2));
+        ParsedCli::Config(ConfigCli::parse_from(config_args))
     } else if args
         .get(1)
         .is_some_and(|value| value == OsStr::new("upgrade"))

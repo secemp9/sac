@@ -212,6 +212,8 @@ pub async fn run(
     app.workspace_rx = Some(ws_rx);
     let mut animation_tick = time::interval(Duration::from_millis(75));
     animation_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut terminal_refresh_tick = time::interval(Duration::from_millis(500));
+    terminal_refresh_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     terminal.draw(|frame| app.render(frame))?;
 
     let mut outcome = TuiOutcome::Exit;
@@ -324,6 +326,15 @@ pub async fn run(
                         app.advance_life();
                     }
                     app.maybe_refresh_workspace();
+                }
+                _ = terminal_refresh_tick.tick() => {
+                    if app.result_rx.is_none() {
+                        let agent_guard = agent.lock().await;
+                        let terminal_manager = agent_guard.terminal_manager();
+                        let terminals = terminal_manager.list().await;
+                        drop(agent_guard);
+                        app.update_terminals(None, terminals);
+                    }
                 }
             }
 
@@ -1264,6 +1275,112 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_g_focuses_previous_response() {
+        let dir = temp_dir("previous-response-focus");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.complete_top_level_response("one".to_string(), Duration::from_secs(1));
+        app.complete_top_level_response("two".to_string(), Duration::from_secs(2));
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::None));
+        assert!(matches!(
+            app.screen,
+            ScreenMode::Focused(FocusPanel::PreviousResponse)
+        ));
+        assert_eq!(app.displayed_previous_response_index(), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ctrl_l_focuses_terminals_and_ctrl_f_focuses_file_changes() {
+        let dir = temp_dir("terminals-file-focus");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::None));
+        assert!(matches!(
+            app.screen,
+            ScreenMode::Focused(FocusPanel::Terminals)
+        ));
+        assert_eq!(app.primary_scroll_panel(), PanelId::Terminals);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::None));
+        assert!(matches!(
+            app.screen,
+            ScreenMode::Focused(FocusPanel::FileChanges)
+        ));
+        assert_eq!(app.primary_scroll_panel(), PanelId::FileChanges);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn previous_response_focus_supports_left_right_navigation() {
+        let dir = temp_dir("previous-response-nav");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.complete_top_level_response("one".to_string(), Duration::from_secs(1));
+        app.complete_top_level_response("two".to_string(), Duration::from_secs(2));
+        app.complete_top_level_response("three".to_string(), Duration::from_secs(3));
+
+        press_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert_eq!(app.displayed_previous_response_index(), Some(1));
+
+        press_key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(app.displayed_previous_response_index(), Some(0));
+
+        press_key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(app.displayed_previous_response_index(), Some(1));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ctrl_k_still_focuses_worksets_outside_plain_thread_navigation() {
+        let dir = temp_dir("ctrl-k-worksets-focus");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.screen = ScreenMode::Focused(FocusPanel::Threads);
+        app.threads
+            .insert("first".to_string(), test_thread_view("first", 2));
+        app.selected_thread = Some("first".to_string());
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::None));
+        assert!(matches!(
+            app.screen,
+            ScreenMode::Focused(FocusPanel::Worksets)
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn numeric_shortcuts_focus_new_panels() {
+        let dir = temp_dir("numeric-focus-panels");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.complete_top_level_response("one".to_string(), Duration::from_secs(1));
+        app.complete_top_level_response("two".to_string(), Duration::from_secs(2));
+
+        let cases = vec![
+            ('1', FocusPanel::Prompt),
+            ('2', FocusPanel::Events),
+            ('3', FocusPanel::Threads),
+            ('4', FocusPanel::Response),
+            ('5', FocusPanel::PreviousResponse),
+            ('6', FocusPanel::Tools),
+            ('7', FocusPanel::Terminals),
+            ('8', FocusPanel::Worksets),
+            ('9', FocusPanel::FileChanges),
+        ];
+
+        for (key, expected) in cases {
+            let action =
+                app.handle_key_event(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL));
+            assert!(matches!(action, AppAction::None));
+            assert!(matches!(app.screen, ScreenMode::Focused(panel) if panel == expected));
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn thread_lifecycle_switches_active_to_idle() {
         let dir = temp_dir("thread");
         let mut app = App::new(metadata_for(&dir), &[], false);
@@ -1405,6 +1522,7 @@ mod tests {
         app.note_prompt_submitted("second prompt");
         assert_eq!(app.responses.len(), 1);
         assert_eq!(app.displayed_response_index(), Some(0));
+        assert_eq!(app.displayed_previous_response_index(), None);
 
         app.complete_top_level_response("second reply".to_string(), Duration::from_secs(2));
         assert_eq!(app.responses.len(), 2);

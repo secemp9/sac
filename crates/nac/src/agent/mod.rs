@@ -358,6 +358,10 @@ impl Agent {
     fn emit(&self, event: AgentEvent) {
         self.event_sink.emit(event);
     }
+
+    pub fn terminal_manager(&self) -> &crate::terminal::TerminalManager {
+        &self.tool_runtime.terminal_manager
+    }
 }
 
 #[cfg(test)]

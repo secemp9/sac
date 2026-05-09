@@ -38,6 +38,10 @@ pub enum AgentEvent {
         name: String,
         line: String,
     },
+    TerminalSnapshot {
+        thread_name: Option<String>,
+        terminals: Vec<crate::terminal::TerminalInfo>,
+    },
     ThreadFinished {
         name: String,
         exit_code: i32,

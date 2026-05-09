@@ -61,6 +61,7 @@ pub struct ClientOverrides {
     pub backend: Option<BackendKind>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub api_key_env: Option<String>,
+    pub api_key: Option<String>,
 }
 
 pub struct TextCompletion {

@@ -15,6 +15,7 @@ use crate::types::ToolDefinition;
 pub mod edit;
 pub mod exec_command;
 pub mod read;
+pub mod terminal;
 pub mod thread;
 pub mod workset;
 pub mod write;
@@ -90,6 +91,7 @@ pub fn worker_tool_definitions() -> Vec<ToolDefinition> {
 
     tools.push(exec_command::exec_command_definition());
     tools.push(exec_command::write_stdin_definition());
+    tools.push(terminal::terminal_definition());
 
     tools
 }
@@ -185,6 +187,16 @@ pub async fn execute_tool(
             },
         },
         "write_stdin" => match exec_command::execute_write_stdin(&args, runtime).await {
+            Ok(content) => ToolResult {
+                content,
+                is_error: false,
+            },
+            Err(e) => ToolResult {
+                content: format!("Error: {:#}", e),
+                is_error: true,
+            },
+        },
+        "terminal" => match terminal::execute_terminal(&args, runtime).await {
             Ok(content) => ToolResult {
                 content,
                 is_error: false,

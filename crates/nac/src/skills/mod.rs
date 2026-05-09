@@ -125,9 +125,14 @@ mod tests {
 
     #[test]
     fn missing_description_skips_skill() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let root = temp_dir("missing_desc");
         let skill_root = root.join("repo/.agents/skills/foo");
+        let nac_home = root.join("home/.config/nac");
+        let home = root.join("home");
         fs::create_dir_all(&skill_root).unwrap();
+        fs::create_dir_all(&nac_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(root.join("repo/.git")).unwrap();
         fs::write(
             skill_root.join(SKILL_FILENAME),
@@ -135,7 +140,24 @@ mod tests {
         )
         .unwrap();
 
+        let previous_nac_home = std::env::var_os("NAC_HOME");
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("NAC_HOME", &nac_home);
+            std::env::set_var("HOME", &home);
+        }
+
         let registry = SkillRegistry::load(Some(&root.join("repo")), None).unwrap();
+
+        match previous_nac_home {
+            Some(value) => unsafe { std::env::set_var("NAC_HOME", value) },
+            None => unsafe { std::env::remove_var("NAC_HOME") },
+        }
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
         assert!(registry.is_none());
     }
 
@@ -183,10 +205,22 @@ mod tests {
 
     #[test]
     fn auto_mounts_skip_paths_already_covered_by_workspace_mount() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         let root = temp_dir("auto_mounts_covered");
         let repo = root.join("repo");
+        let nac_home = root.join("home/.config/nac");
+        let home = root.join("home");
         fs::create_dir_all(repo.join(".git")).unwrap();
         fs::create_dir_all(repo.join(".agents/skills")).unwrap();
+        fs::create_dir_all(&nac_home).unwrap();
+        fs::create_dir_all(&home).unwrap();
+
+        let previous_nac_home = std::env::var_os("NAC_HOME");
+        let previous_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("NAC_HOME", &nac_home);
+            std::env::set_var("HOME", &home);
+        }
 
         let mounts = auto_mounts(
             &repo,
@@ -197,6 +231,16 @@ mod tests {
             }],
         )
         .unwrap();
+
+        match previous_nac_home {
+            Some(value) => unsafe { std::env::set_var("NAC_HOME", value) },
+            None => unsafe { std::env::remove_var("NAC_HOME") },
+        }
+        match previous_home {
+            Some(value) => unsafe { std::env::set_var("HOME", value) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
         assert!(mounts.is_empty());
     }
 

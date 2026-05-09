@@ -105,6 +105,94 @@ mod tests {
     }
 
     #[test]
+    fn config_api_key_is_used_when_env_is_missing() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+
+        let original_openai_key = std::env::var_os("OPENAI_API_KEY");
+        let original_base_url = std::env::var_os("OPENAI_BASE_URL");
+        let original_model = std::env::var_os("OPENAI_MODEL");
+
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("OPENAI_BASE_URL");
+            std::env::remove_var("OPENAI_MODEL");
+        }
+
+        let client = ModelClient::from_env_with_overrides(ClientOverrides {
+            api_key: Some("config-secret".to_string()),
+            ..ClientOverrides::default()
+        })
+        .unwrap();
+
+        assert_eq!(client.base_url(), "https://api.openai.com/v1");
+        assert_eq!(client.backend(), BackendKind::OpenAiResponses);
+        assert_eq!(client.model, "gpt-5.5");
+
+        restore_env("OPENAI_API_KEY", original_openai_key);
+        restore_env("OPENAI_BASE_URL", original_base_url);
+        restore_env("OPENAI_MODEL", original_model);
+    }
+
+    #[test]
+    fn config_api_key_beats_standard_env_api_key() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+
+        let original_openai_key = std::env::var_os("OPENAI_API_KEY");
+        let original_base_url = std::env::var_os("OPENAI_BASE_URL");
+        let original_model = std::env::var_os("OPENAI_MODEL");
+
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "env-secret");
+            std::env::remove_var("OPENAI_BASE_URL");
+            std::env::remove_var("OPENAI_MODEL");
+        }
+
+        let client = ModelClient::from_env_with_overrides(ClientOverrides {
+            api_key: Some("config-secret".to_string()),
+            ..ClientOverrides::default()
+        })
+        .unwrap();
+
+        assert_eq!(client.backend(), BackendKind::OpenAiResponses);
+        assert_eq!(client.model, "gpt-5.5");
+
+        restore_env("OPENAI_API_KEY", original_openai_key);
+        restore_env("OPENAI_BASE_URL", original_base_url);
+        restore_env("OPENAI_MODEL", original_model);
+    }
+
+    #[test]
+    fn config_api_key_env_beats_standard_env_api_key() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+
+        let original_openai_key = std::env::var_os("OPENAI_API_KEY");
+        let original_alt_key = std::env::var_os("ALT_KEY");
+        let original_base_url = std::env::var_os("OPENAI_BASE_URL");
+        let original_model = std::env::var_os("OPENAI_MODEL");
+
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::set_var("ALT_KEY", "alt-secret");
+            std::env::remove_var("OPENAI_BASE_URL");
+            std::env::remove_var("OPENAI_MODEL");
+        }
+
+        let client = ModelClient::from_env_with_overrides(ClientOverrides {
+            api_key_env: Some("ALT_KEY".to_string()),
+            api_key: Some("config-secret".to_string()),
+            ..ClientOverrides::default()
+        })
+        .unwrap();
+
+        assert_eq!(client.backend(), BackendKind::OpenAiResponses);
+
+        restore_env("OPENAI_API_KEY", original_openai_key);
+        restore_env("ALT_KEY", original_alt_key);
+        restore_env("OPENAI_BASE_URL", original_base_url);
+        restore_env("OPENAI_MODEL", original_model);
+    }
+
+    #[test]
     fn detects_backend_from_url() {
         assert_eq!(
             detect_backend("https://api.openai.com/v1").unwrap(),

@@ -41,6 +41,11 @@ use upgrade::*;
 pub async fn run() -> Result<()> {
     let cli = parse_cli();
 
+    if let ParsedCli::Config(cli) = cli {
+        run_config_cli(cli)?;
+        return Ok(());
+    }
+
     match &cli {
         ParsedCli::Run(run_cli) => {
             if let Some(dir) = run_cli.directory.as_ref() {
@@ -55,6 +60,7 @@ pub async fn run() -> Result<()> {
         ParsedCli::CodexAuth(_) => {}
         ParsedCli::Upgrade(_) => {}
         ParsedCli::ManagedWorker(_) => {}
+        ParsedCli::Config(_) => unreachable!("config handled before terminal checks"),
     }
 
     let terminal_available =
@@ -182,8 +188,74 @@ async fn build_run_state(cli: ParsedCli, config: &NacConfig) -> Result<RunState>
                 ui_mode,
             })
         }
+        ParsedCli::Config(_) => unreachable!("config is handled before loading app state"),
         ParsedCli::CodexAuth(_) => unreachable!("codex-auth is handled before loading config"),
         ParsedCli::Upgrade(_) => unreachable!("upgrade is handled before loading config"),
+    }
+}
+
+fn run_config_cli(cli: ConfigCli) -> Result<()> {
+    match cli.command.unwrap_or(ConfigCommand::Show) {
+        ConfigCommand::Path => {
+            let path = config_path()
+                .ok_or_else(|| anyhow::anyhow!("unable to resolve nac config path"))?;
+            println!("{}", path.display());
+            Ok(())
+        }
+        ConfigCommand::Show => {
+            let path = config_path()
+                .ok_or_else(|| anyhow::anyhow!("unable to resolve nac config path"))?;
+            if path.exists() {
+                let content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read config {}", path.display()))?;
+                println!("# Configuration from: {}", path.display());
+                println!();
+                print!("{}", content);
+                if !content.ends_with('\n') {
+                    println!();
+                }
+            } else {
+                println!("# No configuration file found at: {}", path.display());
+                println!("# Run `nac config init` to create a sample configuration file");
+            }
+            Ok(())
+        }
+        ConfigCommand::Init => {
+            let path = config_path()
+                .ok_or_else(|| anyhow::anyhow!("unable to resolve nac config path"))?;
+            if path.exists() {
+                anyhow::bail!(
+                    "configuration file already exists at {}; refusing to overwrite",
+                    path.display()
+                );
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create config directory {}", parent.display())
+                })?;
+            }
+            std::fs::write(&path, sample_config())
+                .with_context(|| format!("failed to write config {}", path.display()))?;
+            println!("Created sample configuration at {}", path.display());
+            Ok(())
+        }
+        ConfigCommand::Reload => {
+            let path = config_path()
+                .ok_or_else(|| anyhow::anyhow!("unable to resolve nac config path"))?;
+            let config = NacConfig::load()?;
+            println!("Configuration reloaded successfully");
+            println!("Config path: {}", path.display());
+            let summary = config_presence_summary(&config);
+            if summary.is_empty() {
+                println!("Configured entries: none");
+            } else {
+                println!("Configured entries:");
+                for entry in summary {
+                    println!("- {}", entry);
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -302,16 +374,22 @@ fn model_overrides(model: &ModelArgs, config: &NacConfig) -> Result<ClientOverri
         base_url: model
             .api_base_url
             .clone()
-            .or_else(|| env_var("OPENAI_BASE_URL"))
-            .or_else(|| config.model.base_url.clone()),
+            .or_else(|| config.model.base_url.clone())
+            .or_else(|| env_var("OPENAI_BASE_URL")),
         model: model
             .api_model
             .clone()
-            .or_else(|| env_var("OPENAI_MODEL"))
-            .or_else(|| config.model.model.clone()),
+            .or_else(|| config.model.model.clone())
+            .or_else(|| env_var("OPENAI_MODEL")),
         backend: model.backend.or(config.model.backend),
         reasoning_effort: model.reasoning_effort.or(config.model.reasoning_effort),
         api_key_env: configured_api_key_env(config),
+        api_key: config
+            .model
+            .api_key
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -586,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn model_overrides_prefer_cli_then_env_then_config() {
+    fn model_overrides_prefer_cli_then_config_then_env() {
         let _guard = TEST_ENV_LOCK.lock().unwrap();
         let original_base_url = std::env::var_os("OPENAI_BASE_URL");
         let original_model = std::env::var_os("OPENAI_MODEL");
@@ -605,9 +683,9 @@ mod tests {
         let env_overrides = model_overrides(&default_model_args(), &config).unwrap();
         assert_eq!(
             env_overrides.base_url.as_deref(),
-            Some("https://env.example/v1")
+            Some("https://config.example/v1")
         );
-        assert_eq!(env_overrides.model.as_deref(), Some("env-model"));
+        assert_eq!(env_overrides.model.as_deref(), Some("config-model"));
         assert_eq!(env_overrides.backend, Some(BackendKind::OpenAiResponses));
         assert_eq!(env_overrides.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(
@@ -632,9 +710,19 @@ mod tests {
         assert_eq!(cli_overrides.model.as_deref(), Some("cli-model"));
         assert_eq!(cli_overrides.backend, Some(BackendKind::DeepSeekChat));
         assert_eq!(cli_overrides.reasoning_effort, Some(ReasoningEffort::Low));
+        assert!(cli_overrides.api_key.is_none());
 
         restore_env("OPENAI_BASE_URL", original_base_url);
         restore_env("OPENAI_MODEL", original_model);
+    }
+
+    #[test]
+    fn model_overrides_include_config_api_key() {
+        let mut config = NacConfig::default();
+        config.model.api_key = Some("config-secret".to_string());
+
+        let overrides = model_overrides(&default_model_args(), &config).unwrap();
+        assert_eq!(overrides.api_key.as_deref(), Some("config-secret"));
     }
 
     #[test]
@@ -744,6 +832,34 @@ url = "https://mcp.context7.com/mcp"
     }
 
     #[test]
+    fn nac_config_loads_model_api_key() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let original_nac_home = std::env::var_os("NAC_HOME");
+        let root = std::env::temp_dir().join(format!(
+            "nac_config_api_key_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[model]\napi_key = \"config-secret\"\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("NAC_HOME", &root);
+        }
+
+        let config = NacConfig::load().unwrap();
+        assert_eq!(config.model.api_key.as_deref(), Some("config-secret"));
+
+        restore_env("NAC_HOME", original_nac_home);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn workspace_dir_from_explicit_mount_uses_workspace_guest_mapping() {
         let root = std::env::temp_dir().join(format!(
             "nac_main_test_workspace_mount_{}",
@@ -779,6 +895,7 @@ url = "https://mcp.context7.com/mcp"
             }
             ParsedCli::Run(_)
             | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
             | ParsedCli::CodexAuth(_)
             | ParsedCli::Upgrade(_) => {
                 panic!("expected resume cli")
@@ -796,6 +913,7 @@ url = "https://mcp.context7.com/mcp"
             }
             ParsedCli::Run(_)
             | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
             | ParsedCli::CodexAuth(_)
             | ParsedCli::Upgrade(_) => {
                 panic!("expected resume cli")
@@ -810,6 +928,7 @@ url = "https://mcp.context7.com/mcp"
             ParsedCli::Run(run) => assert!(run.ui.compact),
             ParsedCli::Resume(_)
             | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
             | ParsedCli::CodexAuth(_)
             | ParsedCli::Upgrade(_) => {
                 panic!("expected run cli")
@@ -832,6 +951,7 @@ url = "https://mcp.context7.com/mcp"
             }
             ParsedCli::Run(_)
             | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
             | ParsedCli::CodexAuth(_)
             | ParsedCli::Upgrade(_) => {
                 panic!("expected resume cli")
@@ -862,6 +982,7 @@ url = "https://mcp.context7.com/mcp"
             }
             ParsedCli::Run(_)
             | ParsedCli::Resume(_)
+            | ParsedCli::Config(_)
             | ParsedCli::CodexAuth(_)
             | ParsedCli::Upgrade(_) => {
                 panic!("expected managed worker cli")
@@ -877,6 +998,7 @@ url = "https://mcp.context7.com/mcp"
             ParsedCli::Run(_)
             | ParsedCli::Resume(_)
             | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
             | ParsedCli::Upgrade(_) => {
                 panic!("expected codex-auth cli")
             }
@@ -894,10 +1016,95 @@ url = "https://mcp.context7.com/mcp"
             ParsedCli::Run(_)
             | ParsedCli::Resume(_)
             | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
             | ParsedCli::Upgrade(_) => {
                 panic!("expected codex-auth cli")
             }
         }
+    }
+
+    #[test]
+    fn parse_config_command_uses_config_cli() {
+        let parsed = parse_cli_from(vec![OsString::from("nac"), OsString::from("config")]);
+        match parsed {
+            ParsedCli::Config(cli) => assert!(cli.command.is_none()),
+            ParsedCli::Run(_)
+            | ParsedCli::Resume(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::CodexAuth(_)
+            | ParsedCli::Upgrade(_) => panic!("expected config cli"),
+        }
+
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("config"),
+            OsString::from("reload"),
+        ]);
+        match parsed {
+            ParsedCli::Config(cli) => {
+                assert!(matches!(cli.command, Some(ConfigCommand::Reload)));
+            }
+            _ => panic!("expected config cli"),
+        }
+    }
+
+    #[test]
+    fn sample_config_mentions_supported_model_secret_fields() {
+        let sample = sample_config();
+        assert!(sample.contains("api_key_env"));
+        assert!(sample.contains("api_key ="));
+    }
+
+    #[test]
+    fn config_presence_summary_masks_api_key_value() {
+        let mut config = NacConfig::default();
+        config.model.api_key = Some("super-secret".to_string());
+        config.model.api_key_env = Some("ALT_KEY_ENV".to_string());
+        let summary = config_presence_summary(&config);
+        assert!(summary.iter().any(|entry| entry == "model.api_key=[set]"));
+        assert!(summary
+            .iter()
+            .any(|entry| entry == "model.api_key_env=ALT_KEY_ENV"));
+        assert!(!summary.iter().any(|entry| entry.contains("super-secret")));
+    }
+
+    #[test]
+    fn run_config_cli_init_show_and_reload_round_trip() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let original_nac_home = std::env::var_os("NAC_HOME");
+        let root = std::env::temp_dir().join(format!(
+            "nac_config_cli_roundtrip_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        unsafe {
+            std::env::set_var("NAC_HOME", &root);
+        }
+
+        run_config_cli(ConfigCli {
+            command: Some(ConfigCommand::Init),
+        })
+        .unwrap();
+
+        let path = config_path().unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[model]"));
+        assert!(content.contains("api_key_env"));
+
+        run_config_cli(ConfigCli {
+            command: Some(ConfigCommand::Reload),
+        })
+        .unwrap();
+        run_config_cli(ConfigCli {
+            command: Some(ConfigCommand::Show),
+        })
+        .unwrap();
+
+        restore_env("NAC_HOME", original_nac_home);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -908,6 +1115,7 @@ url = "https://mcp.context7.com/mcp"
             ParsedCli::Run(_)
             | ParsedCli::Resume(_)
             | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
             | ParsedCli::CodexAuth(_) => panic!("expected upgrade cli"),
         }
 
@@ -924,6 +1132,7 @@ url = "https://mcp.context7.com/mcp"
             ParsedCli::Run(_)
             | ParsedCli::Resume(_)
             | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
             | ParsedCli::CodexAuth(_) => panic!("expected upgrade cli"),
         }
     }
@@ -985,20 +1194,26 @@ url = "https://mcp.context7.com/mcp"
             .unwrap();
 
         assert_eq!(run_config.action, "implement the next step");
-        assert_eq!(run_config.agent.messages.len(), 4);
+        let user_messages: Vec<&Message> = run_config
+            .agent
+            .messages
+            .iter()
+            .filter(|message| matches!(message, Message::User { .. }))
+            .collect();
+        assert_eq!(user_messages.len(), 3);
 
-        match &run_config.agent.messages[1] {
+        match user_messages[0] {
             Message::User { content } => assert!(content.contains("impl retained episode")),
             other => panic!("expected self-history user message, got {:?}", other),
         }
-        match &run_config.agent.messages[2] {
+        match user_messages[1] {
             Message::User { content } => {
                 assert!(content.contains("auth latest episode"));
                 assert!(content.contains("thread \"auth\""));
             }
             other => panic!("expected first source-thread user message, got {:?}", other),
         }
-        match &run_config.agent.messages[3] {
+        match user_messages[2] {
             Message::User { content } => {
                 assert!(content.contains("tests latest episode"));
                 assert!(content.contains("thread \"tests\""));

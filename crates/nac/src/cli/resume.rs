@@ -103,6 +103,12 @@ async fn build_resume_config_from_snapshot(
         backend: Some(snapshot.backend),
         reasoning_effort: snapshot.reasoning_effort,
         api_key_env: configured_api_key_env(config),
+        api_key: config
+            .model
+            .api_key
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
     })?;
     let sandbox = match snapshot.sandbox_spec.clone() {
         Some(spec) => Some(SandboxSession::create(spec, Uuid::new_v4().to_string(), true).await?),

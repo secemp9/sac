@@ -83,7 +83,7 @@ pub async fn execute_exec_command(args: &Value, runtime: &ToolRuntime) -> Result
 
     if cmd.trim().is_empty() {
         let output = manager
-            .write_stdin(&session_name, "", 200, max_output)
+            .write_stdin(&session_name, "", yield_ms, max_output)
             .await?;
         return Ok(serde_json::to_string_pretty(&output)?);
     }
@@ -136,7 +136,7 @@ pub async fn execute_write_stdin(args: &Value, runtime: &ToolRuntime) -> Result<
         .and_then(|v| v.as_u64())
         .unwrap_or(8000) as usize;
 
-    if manager.get(&session_id).await.is_none() {
+    if !manager.contains(&session_id).await {
         return Err(anyhow!(
             "terminal session '{}' not found - it may have been closed or expired",
             session_id
@@ -386,6 +386,18 @@ mod tests {
         assert!(parsed["session_name"].is_string());
     }
 
+    #[tokio::test]
+    async fn exec_command_persistent_empty_cmd_respects_yield_time() {
+        let started = std::time::Instant::now();
+        let result = execute_exec_command(
+            &json!({ "cmd": "", "tty": true, "yield_time_ms": 900 }),
+            &test_runtime(),
+        )
+        .await;
+        assert!(result.is_ok(), "error: {:?}", result.err());
+        assert!(started.elapsed() >= std::time::Duration::from_millis(800));
+    }
+
     // ------------------------------------------------------------------
     // write_stdin
     // ------------------------------------------------------------------
@@ -562,8 +574,41 @@ mod tests {
         .await
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert!(parsed["session_name"].is_null(), "got: {}", result);
-        assert_eq!(parsed["exit_code"].as_i64(), Some(0));
+
+        let mut final_parsed = parsed.clone();
+        for _ in 0..10 {
+            if final_parsed["session_name"].is_null()
+                && final_parsed["exit_code"].as_i64() == Some(0)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let poll = execute_write_stdin(
+                &json!({ "session_id": "test-exit", "chars": "", "yield_time_ms": 200 }),
+                &runtime,
+            )
+            .await;
+            match poll {
+                Ok(output) => {
+                    final_parsed = serde_json::from_str(&output).unwrap();
+                }
+                Err(error) => {
+                    assert!(
+                        error.to_string().contains("not found"),
+                        "unexpected error while polling exit: {}",
+                        error
+                    );
+                    break;
+                }
+            }
+        }
+
+        assert!(
+            final_parsed["session_name"].is_null(),
+            "got: {}",
+            final_parsed
+        );
+        assert_eq!(final_parsed["exit_code"].as_i64(), Some(0));
         assert!(runtime.terminal_manager.get("test-exit").await.is_none());
     }
 

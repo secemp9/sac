@@ -34,6 +34,7 @@ pub(super) fn default_base_url_for_backend_hint(backend: BackendKind) -> &'stati
 pub(super) fn api_key_for_backend(
     backend: BackendKind,
     configured_env: Option<&str>,
+    configured_api_key: Option<&str>,
 ) -> Result<String> {
     match backend {
         BackendKind::ChatGptCodexResponses => Ok(String::new()),
@@ -45,12 +46,18 @@ pub(super) fn api_key_for_backend(
                 return Ok(api_key);
             }
             if let Some(env_name) = configured_env.filter(|name| *name != "OPENAI_API_KEY") {
-                return std::env::var(env_name).map_err(|_| {
-                    anyhow!(
-                        "OPENAI_API_KEY environment variable is not set and configured api_key_env '{}' is not set",
-                        env_name
-                    )
-                });
+                if let Ok(api_key) = std::env::var(env_name) {
+                    return Ok(api_key);
+                }
+            }
+            if let Some(api_key) = configured_api_key.filter(|value| !value.trim().is_empty()) {
+                return Ok(api_key.to_string());
+            }
+            if let Some(env_name) = configured_env.filter(|name| *name != "OPENAI_API_KEY") {
+                return Err(anyhow!(
+                    "OPENAI_API_KEY environment variable is not set, configured api_key_env '{}' is not set, and no config model.api_key is present",
+                    env_name
+                ));
             }
             Err(anyhow!("OPENAI_API_KEY environment variable is not set"))
         }

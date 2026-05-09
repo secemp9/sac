@@ -453,7 +453,9 @@ impl WorkerTimeoutTrace {
                 self.location = TimeoutLocation::Finalizing;
                 self.active_tool_calls.clear();
             }
-            AgentEvent::Error { .. } | AgentEvent::ThreadLog { .. } => {}
+            AgentEvent::Error { .. }
+            | AgentEvent::ThreadLog { .. }
+            | AgentEvent::TerminalSnapshot { .. } => {}
             AgentEvent::ThreadStarted { .. } | AgentEvent::ThreadFinished { .. } => {}
         }
     }
@@ -551,6 +553,8 @@ async fn run_worker(
     let event_sink = runtime.event_sink.clone();
     let thread_name_for_logs = thread_name.to_string();
     let timeout_trace_for_logs = timeout_trace.clone();
+    let terminal_manager = runtime.terminal_manager.clone();
+    let thread_name_for_terminal_events = thread_name.to_string();
     let stderr_handle = tokio::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
@@ -560,6 +564,11 @@ async fn run_worker(
                 timeout_trace_for_logs.lock().await.observe(&event);
                 event_sink.emit(event);
             } else {
+                let terminals = terminal_manager.list().await;
+                event_sink.emit(AgentEvent::TerminalSnapshot {
+                    thread_name: Some(thread_name_for_terminal_events.clone()),
+                    terminals,
+                });
                 event_sink.emit(AgentEvent::ThreadLog {
                     name: thread_name_for_logs.clone(),
                     line: line.clone(),
