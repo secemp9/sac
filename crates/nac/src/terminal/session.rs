@@ -47,6 +47,14 @@ impl TerminalSession {
         rows: u16,
         sandbox: Option<&SandboxSession>,
     ) -> Result<Self> {
+        tracing::debug!(
+            terminal_name = %name,
+            cwd = ?cwd,
+            cols,
+            rows,
+            sandbox = sandbox.is_some(),
+            "spawning terminal session"
+        );
         let pty_system = NativePtySystem::default();
         let pty_pair = pty_system
             .openpty(PtySize {
@@ -137,6 +145,16 @@ impl TerminalSession {
             }
         });
 
+        tracing::info!(
+            terminal_name = %name,
+            resolved_cwd = %resolved_cwd.display(),
+            cols,
+            rows,
+            pid = ?child.process_id(),
+            sandbox = sandbox_cleanup.is_some(),
+            "terminal session spawned"
+        );
+
         Ok(TerminalSession {
             name,
             writer,
@@ -160,6 +178,7 @@ impl TerminalSession {
     }
 
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
+        tracing::trace!(terminal_name = %self.name, bytes = data.len(), "writing PTY bytes");
         self.writer
             .write_all(data)
             .context("Failed to write to PTY")?;
@@ -276,6 +295,12 @@ impl TerminalSession {
     }
 
     pub async fn kill(&mut self) -> Result<()> {
+        tracing::debug!(
+            terminal_name = %self.name,
+            pid = ?self.pid(),
+            sandbox_cleanup = self.sandbox_cleanup.is_some(),
+            "killing terminal session"
+        );
         if let Some((sandbox, pidfile)) = &self.sandbox_cleanup {
             let _ = sandbox.terminal_pipe_kill(pidfile).await;
         }
@@ -297,6 +322,11 @@ impl TerminalSession {
 
         self.reap_child().await;
         self.alive.store(false, Ordering::SeqCst);
+        tracing::info!(
+            terminal_name = %self.name,
+            exit_code = ?self.exit_code(),
+            "terminal session killed"
+        );
         Ok(())
     }
 

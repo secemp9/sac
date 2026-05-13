@@ -106,6 +106,7 @@ pub async fn execute_dispatch(
     };
 
     if !mark_thread_active(runtime, &thread_name).await {
+        tracing::warn!(thread_name = %thread_name, "thread dispatch rejected because thread is already active");
         return ToolResult {
             content: format!(
                 "Thread '{}' is already running; retry after the current dispatch completes.",
@@ -116,6 +117,17 @@ pub async fn execute_dispatch(
     }
 
     let timeout_secs = resolve_thread_timeout_secs(&args, runtime.thread_timeout_secs);
+    tracing::info!(
+        session_id = %session_id,
+        thread_name = %thread_name,
+        action_len = action.len(),
+        source_threads = ?source_threads,
+        timeout_secs,
+        backend = ?client.backend(),
+        model = %client.model,
+        base_url = %client.base_url(),
+        "dispatching managed worker thread"
+    );
 
     runtime.event_sink.emit(AgentEvent::ThreadStarted {
         name: thread_name.clone(),
@@ -137,6 +149,7 @@ pub async fn execute_dispatch(
 
     match result {
         Err(e) => {
+            tracing::error!(thread_name = %thread_name, error = %e, "failed to spawn managed worker thread");
             runtime.event_sink.emit(AgentEvent::Error {
                 thread_name: Some(thread_name.clone()),
                 message: format!("Failed to spawn thread '{}': {}", thread_name, e),
@@ -147,6 +160,15 @@ pub async fn execute_dispatch(
             }
         }
         Ok(run) if run.timed_out => {
+            tracing::warn!(
+                thread_name = %thread_name,
+                exit_code = run.exit_code,
+                stderr_len = run.stderr.len(),
+                stdout_len = run.stdout.len(),
+                timeout_reason = ?run.timeout_reason,
+                timeout_secs,
+                "managed worker thread timed out"
+            );
             let timeout_reason = run.timeout_reason.clone();
             runtime.event_sink.emit(AgentEvent::ThreadFinished {
                 name: thread_name.clone(),
@@ -168,6 +190,13 @@ pub async fn execute_dispatch(
             }
         }
         Ok(run) if run.exit_code != 0 => {
+            tracing::error!(
+                thread_name = %thread_name,
+                exit_code = run.exit_code,
+                stderr_len = run.stderr.len(),
+                stdout_len = run.stdout.len(),
+                "managed worker thread exited with failure"
+            );
             runtime.event_sink.emit(AgentEvent::ThreadFinished {
                 name: thread_name.clone(),
                 exit_code: run.exit_code,
@@ -190,6 +219,13 @@ pub async fn execute_dispatch(
             }
         }
         Ok(run) => {
+            tracing::info!(
+                thread_name = %thread_name,
+                exit_code = run.exit_code,
+                stderr_len = run.stderr.len(),
+                stdout_len = run.stdout.len(),
+                "managed worker thread completed successfully"
+            );
             runtime.event_sink.emit(AgentEvent::ThreadFinished {
                 name: thread_name.clone(),
                 exit_code: run.exit_code,

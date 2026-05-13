@@ -378,6 +378,105 @@ pub(super) enum FocusPanel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PaneFocusBinding {
+    pub(super) panel: FocusPanel,
+    pub(super) label: &'static str,
+    pub(super) mnemonic: char,
+}
+
+pub(super) const PANE_FOCUS_BINDINGS: [PaneFocusBinding; 10] = [
+    PaneFocusBinding {
+        panel: FocusPanel::Prompt,
+        label: "Prompts",
+        mnemonic: 'p',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::Events,
+        label: "Events",
+        mnemonic: 'e',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::Threads,
+        label: "Threads",
+        mnemonic: 't',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::Response,
+        label: "Responses",
+        mnemonic: 'r',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::PreviousResponse,
+        label: "Previous",
+        mnemonic: 'g',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::Tools,
+        label: "Tools",
+        mnemonic: 'o',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::Terminals,
+        label: "Terminals",
+        mnemonic: 'l',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::Workspace,
+        label: "Workspace",
+        mnemonic: 'w',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::Worksets,
+        label: "Worksets",
+        mnemonic: 'k',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::FileChanges,
+        label: "File Changes",
+        mnemonic: 'f',
+    },
+];
+
+impl PaneFocusBinding {
+    pub(super) fn short_binding(self) -> String {
+        format!("C-{}", self.mnemonic.to_ascii_uppercase())
+    }
+
+    pub(super) fn full_binding(self) -> String {
+        format!("Ctrl-{}", self.mnemonic.to_ascii_uppercase())
+    }
+
+    pub(super) fn matches(self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        if !modifiers.contains(KeyModifiers::CONTROL) {
+            return false;
+        }
+
+        match code {
+            KeyCode::Char(value) => {
+                let value = value.to_ascii_lowercase();
+                value == self.mnemonic
+            }
+            _ => false,
+        }
+    }
+}
+
+pub(super) fn pane_focus_binding(panel: FocusPanel) -> Option<PaneFocusBinding> {
+    PANE_FOCUS_BINDINGS
+        .iter()
+        .copied()
+        .find(|binding| binding.panel == panel)
+}
+
+pub(super) fn pane_focus_panel_for_key(key: KeyEvent) -> Option<FocusPanel> {
+    PANE_FOCUS_BINDINGS
+        .iter()
+        .copied()
+        .find(|binding| binding.matches(key.code, key.modifiers))
+        .map(|binding| binding.panel)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScreenMode {
     Dashboard,
     Focused(FocusPanel),

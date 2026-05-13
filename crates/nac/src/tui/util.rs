@@ -139,3 +139,8 @@ pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let y = area.y + area.height.saturating_sub(overlay_height) / 2;
     Rect::new(x, y, overlay_width, overlay_height)
 }
+
+pub(super) fn compact_hint_cell(binding: PaneFocusBinding, width: usize) -> String {
+    let text = format!("{} {}", binding.short_binding(), binding.label);
+    fit_text(&text, width)
+}

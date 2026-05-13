@@ -4,11 +4,20 @@ pub(super) async fn build_resume_picker_config(
     cli: ResumeCli,
     config: &NacConfig,
 ) -> Result<OrchestratorRunConfig> {
+    let model_args = cli.model.clone();
+    tracing::debug!(
+        directory = ?cli.directory,
+        store_override = ?cli.store.store_path,
+        backend_override = ?model_args.backend,
+        reasoning_override = ?model_args.reasoning_effort,
+        base_url_override = ?model_args.api_base_url,
+        model_override = ?model_args.api_model,
+        "building resume picker config"
+    );
     if let Some(dir) = cli.directory.as_ref() {
         std::env::set_current_dir(dir)?;
     }
-    let client =
-        ModelClient::from_env_with_overrides(model_overrides(&ModelArgs::default(), config)?)?;
+    let client = ModelClient::from_env_with_overrides(model_overrides(&model_args, config)?)?;
     let current_dir = std::env::current_dir()?;
     let agents_md = AgentsMdBundle::load(Some(&current_dir))?;
     let working_directory = current_directory_display();
@@ -23,6 +32,14 @@ pub(super) async fn build_resume_picker_config(
             .unwrap_or_else(store::default_store_path),
     );
     store::initialize(&store_path)?;
+    tracing::info!(
+        cwd = %current_dir.display(),
+        store_path = %store_path.display(),
+        backend = ?client.backend(),
+        model = %client.model,
+        base_url = %client.base_url(),
+        "resume picker config ready"
+    );
     let agent = Agent::with_config(
         client.clone(),
         AgentConfig {
@@ -61,6 +78,19 @@ pub(super) async fn build_resume_config(
         anyhow::bail!("resume accepts either a session id or --last, not both");
     }
 
+    let model_args = cli.model.clone();
+    tracing::debug!(
+        session_id = ?cli.session_id,
+        last = cli.last,
+        directory = ?cli.directory,
+        store_override = ?cli.store.store_path,
+        backend_override = ?model_args.backend,
+        reasoning_override = ?model_args.reasoning_effort,
+        base_url_override = ?model_args.api_base_url,
+        model_override = ?model_args.api_model,
+        "building resume config"
+    );
+
     if let Some(dir) = cli.directory.as_ref() {
         std::env::set_current_dir(dir)?;
     }
@@ -79,7 +109,18 @@ pub(super) async fn build_resume_config(
         (None, _) => sessions::load_last_session(&resume_store_path)?,
     };
 
-    build_resume_config_from_snapshot(snapshot, config).await
+    tracing::info!(
+        resumed_session_id = %snapshot.session_id,
+        resumed_cwd = %snapshot.cwd.display(),
+        resumed_store_path = %snapshot.store_path.display(),
+        message_count = snapshot.messages.len(),
+        backend = ?snapshot.backend,
+        model = %snapshot.model,
+        base_url = %snapshot.base_url,
+        "loaded resume snapshot"
+    );
+
+    build_resume_config_from_snapshot(snapshot, config, &model_args).await
 }
 
 pub(super) async fn build_resume_config_for_session(
@@ -88,20 +129,37 @@ pub(super) async fn build_resume_config_for_session(
     config: &NacConfig,
 ) -> Result<OrchestratorRunConfig> {
     let snapshot = sessions::load_session(&store_path, session_id)?;
-    build_resume_config_from_snapshot(snapshot, config).await
+    build_resume_config_from_snapshot(snapshot, config, &ModelArgs::default()).await
 }
 
 async fn build_resume_config_from_snapshot(
     snapshot: SessionSnapshot,
     config: &NacConfig,
+    model_args: &ModelArgs,
 ) -> Result<OrchestratorRunConfig> {
+    tracing::debug!(
+        session_id = %snapshot.session_id,
+        snapshot_cwd = %snapshot.cwd.display(),
+        snapshot_store_path = %snapshot.store_path.display(),
+        backend_override = ?model_args.backend,
+        reasoning_override = ?model_args.reasoning_effort,
+        base_url_override = ?model_args.api_base_url,
+        model_override = ?model_args.api_model,
+        "restoring orchestrator from session snapshot"
+    );
     std::env::set_current_dir(&snapshot.cwd)?;
     let current_dir = std::env::current_dir()?;
     let client = ModelClient::from_env_with_overrides(ClientOverrides {
-        base_url: Some(snapshot.base_url.clone()),
-        model: Some(snapshot.model.clone()),
-        backend: Some(snapshot.backend),
-        reasoning_effort: snapshot.reasoning_effort,
+        base_url: model_args
+            .api_base_url
+            .clone()
+            .or_else(|| Some(snapshot.base_url.clone())),
+        model: model_args
+            .api_model
+            .clone()
+            .or_else(|| Some(snapshot.model.clone())),
+        backend: model_args.backend.or(Some(snapshot.backend)),
+        reasoning_effort: model_args.reasoning_effort.or(snapshot.reasoning_effort),
         api_key_env: configured_api_key_env(config),
         api_key: config
             .model
@@ -130,6 +188,17 @@ async fn build_resume_config_from_snapshot(
         .map(|session| session.status_text())
         .unwrap_or_else(|| "off".to_string());
     let agents_md_status = agents_md.status_text();
+    tracing::info!(
+        session_id = %snapshot.session_id,
+        cwd = %current_dir.display(),
+        backend = ?client.backend(),
+        model = %client.model,
+        base_url = %client.base_url(),
+        sandbox_status = %sandbox_status,
+        agents_md_status = %agents_md_status,
+        restored_messages = snapshot.messages.len(),
+        "resume snapshot hydrated"
+    );
 
     store::initialize(&snapshot.store_path)?;
     let mut agent = Agent::with_config(

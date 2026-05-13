@@ -24,3 +24,5 @@ url = "2"
 serde_yaml = "0.9"
 rand = "0.10.1"
 blake3 = "1.8.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time"] }

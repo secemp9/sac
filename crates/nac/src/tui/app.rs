@@ -36,6 +36,7 @@ pub(super) struct App {
     pub(super) suppress_mouse_scroll_until: Option<Instant>,
     pub(super) selection: Option<SelectionState>,
     pub(super) help_visible: bool,
+    pub(super) hint_visible: bool,
     pub(super) screen: ScreenMode,
     pub(super) session_picker: SessionPickerState,
     pub(super) life_field: LifeField,
@@ -120,6 +121,7 @@ impl App {
             suppress_mouse_scroll_until: None,
             selection: None,
             help_visible: false,
+            hint_visible: false,
             screen: ScreenMode::Dashboard,
             session_picker: SessionPickerState::default(),
             life_field: LifeField::default(),
@@ -195,6 +197,7 @@ impl App {
     ) -> (
         ScreenMode,
         bool,
+        bool,
         Option<String>,
         usize,
         Option<usize>,
@@ -203,6 +206,7 @@ impl App {
         (
             self.screen,
             self.help_visible,
+            self.hint_visible,
             self.selected_thread.clone(),
             self.session_picker.selected,
             self.selected_prompt,
@@ -221,6 +225,14 @@ impl App {
 
     pub(super) fn handle_key_event_inner(&mut self, key: KeyEvent) -> AppAction {
         if key.kind == KeyEventKind::Release {
+            return AppAction::None;
+        }
+
+        if self.is_hint_toggle_key(key) {
+            if key.kind == KeyEventKind::Repeat {
+                return AppAction::None;
+            }
+            self.hint_visible = !self.hint_visible;
             return AppAction::None;
         }
 
@@ -266,159 +278,12 @@ impl App {
                 ..
             } if self.prompt().is_empty() => {
                 self.selection = None;
+                self.hint_visible = false;
                 self.help_visible = true;
                 AppAction::None
             }
-            KeyEvent {
-                code: KeyCode::Char('e'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Events);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('r'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Response);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('1'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Prompt);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('2'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Events);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('3'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Threads);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('4'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Response);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('5'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::PreviousResponse);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('6'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Tools);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('7'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Terminals);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('8'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Worksets);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('9'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::FileChanges);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('p'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Prompt);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('t'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Threads);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('o'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Tools);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('w'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Workspace);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('k'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Worksets);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::PreviousResponse);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('l'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::Terminals);
-                AppAction::None
-            }
-            KeyEvent {
-                code: KeyCode::Char('f'),
-                modifiers,
-                ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.toggle_focus_panel(FocusPanel::FileChanges);
+            _ if pane_focus_panel_for_key(key).is_some() => {
+                self.toggle_focus_panel(pane_focus_panel_for_key(key).unwrap());
                 AppAction::None
             }
             KeyEvent {
@@ -826,7 +691,109 @@ impl App {
     pub(super) fn open_session_picker(&mut self, startup: bool) {
         self.refresh_session_picker();
         self.selection = None;
+        self.hint_visible = false;
         self.screen = ScreenMode::SessionPicker { startup };
+    }
+
+    pub(super) fn is_hint_toggle_key(&self, key: KeyEvent) -> bool {
+        key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('h'))
+    }
+
+    pub(super) fn decorate_focus_title(
+        &self,
+        panel: FocusPanel,
+        mut title: Line<'static>,
+    ) -> Line<'static> {
+        if !self.hint_visible {
+            return title;
+        }
+        let Some(binding) = pane_focus_binding(panel) else {
+            return title;
+        };
+        title.spans.push(Span::raw(" ".to_string()));
+        title.spans.push(Span::styled(
+            binding.short_binding(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        title
+    }
+
+    pub(super) fn static_focus_title(
+        &self,
+        panel: FocusPanel,
+        label: &'static str,
+    ) -> Line<'static> {
+        self.decorate_focus_title(panel, panel_title(label))
+    }
+
+    pub(super) fn pane_focus_help_rows(&self) -> Vec<Line<'static>> {
+        PANE_FOCUS_BINDINGS
+            .iter()
+            .map(|binding| {
+                Line::from(vec![
+                    Span::styled(
+                        binding.full_binding(),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" focus {}", binding.label.to_ascii_lowercase()),
+                        Style::default().fg(Color::White),
+                    ),
+                ])
+            })
+            .collect()
+    }
+
+    pub(super) fn compact_hint_legend_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let left_width = width / 2;
+        PANE_FOCUS_BINDINGS
+            .chunks(2)
+            .map(|pair| {
+                let left = compact_hint_cell(pair[0], left_width);
+                let right = pair
+                    .get(1)
+                    .map(|binding| {
+                        compact_hint_cell(*binding, width.saturating_sub(left_width + 2))
+                    })
+                    .unwrap_or_default();
+                Line::from(vec![
+                    Span::styled(left, Style::default().fg(Color::White)),
+                    Span::raw("  ".to_string()),
+                    Span::styled(right, Style::default().fg(Color::White)),
+                ])
+            })
+            .collect()
+    }
+
+    pub(super) fn should_render_compact_hint_overlay(&self) -> bool {
+        self.hint_visible
+            && matches!(self.ui_mode, UiMode::Compact)
+            && matches!(self.screen, ScreenMode::Dashboard)
+            && !self.help_visible
+            && !matches!(self.screen, ScreenMode::SessionPicker { .. })
+    }
+
+    pub(super) fn render_compact_hint_overlay(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let overlay_width = area.width.saturating_sub(6).min(54).max(28);
+        let content_lines =
+            self.compact_hint_legend_lines(overlay_width.saturating_sub(2) as usize);
+        let overlay_height = (content_lines.len() as u16 + 3)
+            .min(area.height.saturating_sub(2).max(4))
+            .max(4);
+        let overlay = centered_rect(overlay_width, overlay_height, area);
+        let block = panel_block("PANE KEYS");
+        let inner = block.inner(overlay);
+        frame.render_widget(Clear, overlay);
+        frame.render_widget(block, overlay);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        frame.render_widget(
+            Paragraph::new(Text::from(content_lines)).wrap(ratatui::widgets::Wrap { trim: false }),
+            inner,
+        );
     }
 
     pub(super) fn toggle_focus_panel(&mut self, panel: FocusPanel) {
@@ -1707,6 +1674,10 @@ impl App {
         self.render_compact_status(frame, sections[2]);
         self.render_compact_composer(frame, sections[3]);
 
+        if self.should_render_compact_hint_overlay() {
+            self.render_compact_hint_overlay(frame, area);
+        }
+
         if self.help_visible {
             self.render_help_overlay(frame, sections[1]);
         }
@@ -2394,15 +2365,18 @@ impl App {
             Some(index) => format!(" {}/{}", index + 1, self.prompts.len()),
             None => " 0/0".to_string(),
         };
-        panel_title_segments(vec![
-            Span::styled(
-                "PROMPTS".to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(position, Style::default().fg(Color::DarkGray)),
-        ])
+        self.decorate_focus_title(
+            FocusPanel::Prompt,
+            panel_title_segments(vec![
+                Span::styled(
+                    "PROMPTS".to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(position, Style::default().fg(Color::DarkGray)),
+            ]),
+        )
     }
 
     pub(super) fn composer_panel_title(&self) -> Line<'static> {
@@ -2455,7 +2429,13 @@ impl App {
             ),
         ];
 
-        self.render_selectable_panel(frame, area, PanelId::Workspace, "WORKSPACE", lines);
+        self.render_selectable_panel_with_title(
+            frame,
+            area,
+            PanelId::Workspace,
+            self.static_focus_title(FocusPanel::Workspace, "WORKSPACE"),
+            lines,
+        );
     }
 
     pub(super) fn render_help_overlay(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -2470,7 +2450,7 @@ impl App {
             return;
         }
 
-        let lines = vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled(
                     "Enter",
@@ -2489,42 +2469,12 @@ impl App {
                 ),
                 Span::styled(" newline", Style::default().fg(Color::White)),
             ]),
-            Line::from(vec![
-                Span::styled(
-                    "Ctrl-T / Ctrl-E / Ctrl-P / Ctrl-R",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " focus threads / events / prompts / responses",
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "Ctrl-G / Ctrl-L / Ctrl-F",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " focus previous / terminals / file changes",
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "Ctrl-1…Ctrl-9",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    " direct numeric pane focus",
-                    Style::default().fg(Color::White),
-                ),
-            ]),
+            Line::from(Span::styled(
+                "Ctrl-P / Ctrl-E / Ctrl-T / Ctrl-R / Ctrl-G / Ctrl-O / Ctrl-L / Ctrl-W / Ctrl-K / Ctrl-F",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
             Line::from(vec![
                 Span::styled(
                     "← / →",
@@ -2587,10 +2537,15 @@ impl App {
             ]),
             Line::from(""),
             Line::from(Span::styled(
+                "Ctrl-H toggles pane key hints.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
                 "? or Esc closes this overlay.",
                 Style::default().fg(Color::DarkGray),
             )),
         ];
+        lines.splice(2..2, self.pane_focus_help_rows());
 
         frame.render_widget(
             Paragraph::new(Text::from(lines)).wrap(ratatui::widgets::Wrap { trim: false }),
@@ -2651,7 +2606,13 @@ impl App {
             }
         }
 
-        self.render_scrollable_lines_panel(frame, area, PanelId::Threads, "THREADS", lines);
+        self.render_scrollable_lines_panel_with_title(
+            frame,
+            area,
+            PanelId::Threads,
+            self.static_focus_title(FocusPanel::Threads, "THREADS"),
+            lines,
+        );
     }
 
     pub(super) fn render_events_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -2701,26 +2662,29 @@ impl App {
             Some(index) => format!(" {}/{}", index + 1, self.responses.len()),
             None => " 0/0".to_string(),
         };
-        let title = panel_title_segments(vec![
-            Span::styled(
-                "RESPONSES".to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(position, Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(
-                runtime,
-                Style::default().fg(if runtime_duration.is_none() {
-                    Color::DarkGray
-                } else if runtime_is_live {
-                    Color::Green
-                } else {
-                    Color::Yellow
-                }),
-            ),
-        ]);
+        let title = self.decorate_focus_title(
+            FocusPanel::Response,
+            panel_title_segments(vec![
+                Span::styled(
+                    "RESPONSES".to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(position, Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                Span::styled(
+                    runtime,
+                    Style::default().fg(if runtime_duration.is_none() {
+                        Color::DarkGray
+                    } else if runtime_is_live {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    }),
+                ),
+            ]),
+        );
         self.render_selectable_rich_panel_with_title(frame, area, PanelId::Response, title, lines);
     }
 
@@ -2738,18 +2702,21 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             ))],
         };
-        let title = panel_title_segments(vec![
-            Span::styled(
-                "PREVIOUS".to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(match displayed_index {
-                Some(index) => format!(" {}/{}", index + 1, self.responses.len()),
-                None => format!(" 0/{}", self.responses.len()),
-            }),
-        ]);
+        let title = self.decorate_focus_title(
+            FocusPanel::PreviousResponse,
+            panel_title_segments(vec![
+                Span::styled(
+                    "PREVIOUS".to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(match displayed_index {
+                    Some(index) => format!(" {}/{}", index + 1, self.responses.len()),
+                    None => format!(" 0/{}", self.responses.len()),
+                }),
+            ]),
+        );
         self.render_selectable_rich_panel_with_title(
             frame,
             area,
@@ -2757,6 +2724,26 @@ impl App {
             title,
             lines,
         );
+    }
+
+    #[cfg(test)]
+    pub(super) fn render_previous_title_for_test(&self) -> Line<'static> {
+        let displayed_index = self.displayed_previous_response_index();
+        self.decorate_focus_title(
+            FocusPanel::PreviousResponse,
+            panel_title_segments(vec![
+                Span::styled(
+                    "PREVIOUS".to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(match displayed_index {
+                    Some(index) => format!(" {}/{}", index + 1, self.responses.len()),
+                    None => format!(" 0/{}", self.responses.len()),
+                }),
+            ]),
+        )
     }
 
     pub(super) fn rendered_response_lines(
@@ -3031,7 +3018,7 @@ impl App {
         } else {
             Color::Yellow
         };
-        panel_title_segments(vec![
+        let title = panel_title_segments(vec![
             Span::styled(
                 "EVENTS".to_string(),
                 Style::default()
@@ -3040,7 +3027,8 @@ impl App {
             ),
             Span::raw(" "),
             Span::styled("●".to_string(), Style::default().fg(dot_color)),
-        ])
+        ]);
+        self.decorate_focus_title(FocusPanel::Events, title)
     }
 
     pub(super) fn render_tools_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -3116,7 +3104,13 @@ impl App {
             )));
         }
 
-        self.render_scrollable_lines_panel(frame, area, PanelId::Tools, "TOOLS", lines);
+        self.render_scrollable_lines_panel_with_title(
+            frame,
+            area,
+            PanelId::Tools,
+            self.static_focus_title(FocusPanel::Tools, "TOOLS"),
+            lines,
+        );
     }
 
     pub(super) fn render_terminals_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -3185,7 +3179,13 @@ impl App {
             }
         }
 
-        self.render_scrollable_lines_panel(frame, area, PanelId::Terminals, "TERMINALS", lines);
+        self.render_scrollable_lines_panel_with_title(
+            frame,
+            area,
+            PanelId::Terminals,
+            self.static_focus_title(FocusPanel::Terminals, "TERMINALS"),
+            lines,
+        );
     }
 
     pub(super) fn render_worksets_panel(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -3244,19 +3244,22 @@ impl App {
             }
         }
 
-        let title = panel_title_segments(vec![
-            Span::styled(
-                "WORKSETS".to_string(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                self.worksets.items.len().to_string(),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
+        let title = self.decorate_focus_title(
+            FocusPanel::Worksets,
+            panel_title_segments(vec![
+                Span::styled(
+                    "WORKSETS".to_string(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    self.worksets.items.len().to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+        );
         self.render_scrollable_lines_panel_with_title(frame, area, PanelId::Worksets, title, lines);
     }
 
@@ -3306,7 +3309,12 @@ impl App {
             }
         }
 
-        render_lines_panel(frame, area, "FILE CHANGES", lines);
+        render_lines_panel_with_title(
+            frame,
+            area,
+            self.static_focus_title(FocusPanel::FileChanges, "FILE CHANGES"),
+            lines,
+        );
     }
 
     pub(super) fn render_composer(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -3370,23 +3378,6 @@ impl App {
             ));
             frame.render_widget(Paragraph::new(notice_line), notice_area);
         }
-    }
-
-    pub(super) fn render_selectable_panel(
-        &mut self,
-        frame: &mut ratatui::Frame,
-        area: Rect,
-        panel_id: PanelId,
-        title: &'static str,
-        logical_lines: Vec<String>,
-    ) {
-        self.render_selectable_panel_with_title(
-            frame,
-            area,
-            panel_id,
-            panel_title(title),
-            logical_lines,
-        );
     }
 
     pub(super) fn render_selectable_panel_with_title(
@@ -3536,23 +3527,6 @@ impl App {
         );
 
         frame.render_widget(Paragraph::new(Text::from(rendered)), area);
-    }
-
-    pub(super) fn render_scrollable_lines_panel(
-        &mut self,
-        frame: &mut ratatui::Frame,
-        area: Rect,
-        panel_id: PanelId,
-        title: &'static str,
-        lines: Vec<Line<'static>>,
-    ) {
-        self.render_scrollable_lines_panel_with_title(
-            frame,
-            area,
-            panel_id,
-            panel_title(title),
-            lines,
-        );
     }
 
     pub(super) fn render_scrollable_lines_panel_with_title(

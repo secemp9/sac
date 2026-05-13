@@ -202,6 +202,12 @@ fn run_config_cli(cli: ConfigCli) -> Result<()> {
             println!("{}", path.display());
             Ok(())
         }
+        ConfigCommand::LogPath => {
+            let path = crate::logging::current_log_path()
+                .ok_or_else(|| anyhow::anyhow!("unable to resolve nac log path"))?;
+            println!("{}", path.display());
+            Ok(())
+        }
         ConfigCommand::Show => {
             let path = config_path()
                 .ok_or_else(|| anyhow::anyhow!("unable to resolve nac config path"))?;
@@ -960,6 +966,28 @@ url = "https://mcp.context7.com/mcp"
     }
 
     #[test]
+    fn parse_resume_backend_flag_uses_resume_model_args() {
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("resume"),
+            OsString::from("--backend"),
+            OsString::from("openai-responses"),
+        ]);
+        match parsed {
+            ParsedCli::Resume(resume) => {
+                assert_eq!(resume.model.backend, Some(BackendKind::OpenAiResponses));
+            }
+            ParsedCli::Run(_)
+            | ParsedCli::ManagedWorker(_)
+            | ParsedCli::Config(_)
+            | ParsedCli::CodexAuth(_)
+            | ParsedCli::Upgrade(_) => {
+                panic!("expected resume cli")
+            }
+        }
+    }
+
+    #[test]
     fn parse_hidden_worker_command_uses_managed_worker_cli() {
         let parsed = parse_cli_from(vec![
             OsString::from("nac"),
@@ -1046,6 +1074,18 @@ url = "https://mcp.context7.com/mcp"
             }
             _ => panic!("expected config cli"),
         }
+
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("config"),
+            OsString::from("log-path"),
+        ]);
+        match parsed {
+            ParsedCli::Config(cli) => {
+                assert!(matches!(cli.command, Some(ConfigCommand::LogPath)));
+            }
+            _ => panic!("expected config cli"),
+        }
     }
 
     #[test]
@@ -1102,6 +1142,33 @@ url = "https://mcp.context7.com/mcp"
             command: Some(ConfigCommand::Show),
         })
         .unwrap();
+
+        restore_env("NAC_HOME", original_nac_home);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn current_log_path_uses_nac_home_layout() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let original_nac_home = std::env::var_os("NAC_HOME");
+        let root = std::env::temp_dir().join(format!(
+            "nac_log_path_cli_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        unsafe {
+            std::env::set_var("NAC_HOME", &root);
+        }
+
+        let path = crate::paths::nac_log_path_for_pid(std::process::id()).unwrap();
+        assert_eq!(
+            path,
+            root.join("logs")
+                .join(format!("nac-{}.log", std::process::id()))
+        );
 
         restore_env("NAC_HOME", original_nac_home);
         let _ = std::fs::remove_dir_all(root);
@@ -1300,6 +1367,7 @@ url = "https://mcp.context7.com/mcp"
                 directory: Some(session_cwd.clone()),
                 store: StoreArgs { store_path: None },
                 ui: default_ui_args(),
+                model: default_model_args(),
             },
             &NacConfig::default(),
         )
@@ -1341,5 +1409,59 @@ url = "https://mcp.context7.com/mcp"
                 std::env::remove_var("OPENAI_API_KEY");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn resume_picker_uses_explicit_backend_override() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+
+        let original_api_key = std::env::var_os("OPENAI_API_KEY");
+        let original_base_url = std::env::var_os("OPENAI_BASE_URL");
+        let original_model = std::env::var_os("OPENAI_MODEL");
+        let original_cwd = std::env::current_dir().unwrap();
+
+        let root = std::env::temp_dir().join(format!(
+            "nac_resume_picker_backend_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "test_dummy_key");
+            std::env::set_var("OPENAI_BASE_URL", "http://localhost:8317/v1");
+            std::env::set_var("OPENAI_MODEL", "gpt-5.4");
+        }
+
+        std::env::set_current_dir(std::env::temp_dir()).unwrap();
+        let run_config = build_resume_picker_config(
+            ResumeCli {
+                session_id: None,
+                last: false,
+                directory: Some(root.clone()),
+                store: StoreArgs { store_path: None },
+                ui: default_ui_args(),
+                model: ModelArgs {
+                    backend: Some(BackendKind::OpenAiResponses),
+                    ..default_model_args()
+                },
+            },
+            &NacConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run_config.client.backend(), BackendKind::OpenAiResponses);
+        assert_eq!(run_config.client.base_url(), "http://localhost:8317/v1");
+        assert_eq!(run_config.client.model, "gpt-5.4");
+
+        std::env::set_current_dir(original_cwd).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+
+        restore_env("OPENAI_API_KEY", original_api_key);
+        restore_env("OPENAI_BASE_URL", original_base_url);
+        restore_env("OPENAI_MODEL", original_model);
     }
 }

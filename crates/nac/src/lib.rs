@@ -5,6 +5,7 @@ pub mod agents_md;
 pub mod cli;
 pub mod events;
 pub mod life;
+pub mod logging;
 pub mod mcp;
 pub mod model;
 pub mod paths;

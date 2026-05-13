@@ -129,5 +129,6 @@ mod tests {
     #[test]
     fn decode_prefixed_event_ignores_plain_lines() {
         assert!(decode_stderr_event("plain stderr line").is_none());
+        assert!(decode_stderr_event("2026-01-01T00:00:00Z DEBUG nac::cli log line").is_none());
     }
 }

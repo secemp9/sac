@@ -142,6 +142,7 @@ enum SlashCommand {
     Run { workset_id: String },
 }
 
+#[derive(Debug)]
 pub enum TuiOutcome {
     Exit,
     ResumeSession(String),
@@ -155,14 +156,32 @@ pub async fn run(
     start_in_session_picker: bool,
     ui_mode: UiMode,
 ) -> Result<TuiOutcome> {
+    tracing::info!(
+        ui_mode = ?ui_mode,
+        cwd = %metadata.cwd,
+        workspace_host_path = ?metadata.workspace_host_path,
+        store_path = %metadata.store_path.display(),
+        model = %metadata.model,
+        base_url = %metadata.base_url,
+        backend = %metadata.backend,
+        reasoning_effort = ?metadata.reasoning_effort,
+        session_id = ?metadata.session_id,
+        sandbox_status = %metadata.sandbox_status,
+        agents_md_status = %metadata.agents_md_status,
+        restored_message_count = restored_messages.len(),
+        start_in_session_picker,
+        "starting tui runtime"
+    );
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<CrosstermEvent>();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
     agent.set_event_sink(EventSink::channel(event_tx));
     let agent = Arc::new(Mutex::new(agent));
 
+    tracing::debug!("enabling raw mode for tui");
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    tracing::debug!("entering alternate screen for tui");
     crossterm::execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -171,6 +190,12 @@ pub async fn run(
     let keyboard_enhancements_enabled = enable_keyboard_enhancements(&mut terminal);
     let bracketed_paste_enabled = enable_bracketed_paste(&mut terminal);
     let mouse_capture_enabled = enable_mouse_capture(&mut terminal);
+    tracing::debug!(
+        keyboard_enhancements_enabled,
+        bracketed_paste_enabled,
+        mouse_capture_enabled,
+        "tui input capabilities configured"
+    );
 
     let running = Arc::new(AtomicBool::new(true));
     let input_thread = spawn_input_thread(running.clone(), input_tx);
@@ -270,7 +295,7 @@ pub async fn run(
                             }
                         }
                         None => {
-                            eprintln!("ERROR: input thread terminated unexpectedly, shutting down");
+                            tracing::error!("input thread terminated unexpectedly; shutting down tui");
                             app.quit = true;
                         }
                     }
@@ -346,6 +371,7 @@ pub async fn run(
     }
     .await;
 
+    tracing::debug!(outcome = ?outcome, "starting tui cleanup");
     running.store(false, AtomicOrdering::SeqCst);
     let _ = input_thread.join();
 
@@ -366,6 +392,7 @@ pub async fn run(
 
     loop_result?;
     cleanup_result?;
+    tracing::info!(outcome = ?outcome, "tui runtime exited");
     Ok(outcome)
 }
 
@@ -376,6 +403,12 @@ fn submit_prompt(
     terminal: &mut UiTerminal,
 ) -> Result<()> {
     let agent_prompt = expand_user_prompt(&prompt);
+    tracing::info!(
+        prompt_len = prompt.len(),
+        expanded_prompt_len = agent_prompt.len(),
+        slash_mode = composer_is_slash_mode(&[prompt.clone()]),
+        "submitting prompt from tui"
+    );
     app.note_prompt_submitted(&prompt);
     app.current_prompt = prompt;
     app.clear_composer();
@@ -1139,6 +1172,68 @@ mod tests {
     }
 
     #[test]
+    fn compact_dashboard_hint_legend_lists_all_bindings() {
+        let dir = temp_dir("compact-hint-legend");
+        let mut app = App::new_with_mode(metadata_for(&dir), &[], false, UiMode::Compact);
+        app.hint_visible = true;
+
+        let rendered = app
+            .compact_hint_legend_lines(40)
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("C-P"), "got: {}", rendered);
+        assert!(rendered.contains("Prompts"), "got: {}", rendered);
+        assert!(rendered.contains("C-W"), "got: {}", rendered);
+        assert!(rendered.contains("Workspace"), "got: {}", rendered);
+        assert!(rendered.contains("C-F"), "got: {}", rendered);
+        assert!(!rendered.contains("/"), "got: {}", rendered);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compact_hint_overlay_gating_matches_mode_and_visibility() {
+        let dir = temp_dir("compact-hint-gating");
+        let mut app = App::new_with_mode(metadata_for(&dir), &[], false, UiMode::Compact);
+        app.hint_visible = true;
+        assert!(app.should_render_compact_hint_overlay());
+
+        app.help_visible = true;
+        assert!(!app.should_render_compact_hint_overlay());
+        app.help_visible = false;
+
+        app.screen = ScreenMode::Focused(FocusPanel::Prompt);
+        assert!(!app.should_render_compact_hint_overlay());
+        app.screen = ScreenMode::Dashboard;
+
+        app.screen = ScreenMode::SessionPicker { startup: false };
+        assert!(!app.should_render_compact_hint_overlay());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn help_focus_rows_use_full_binding_text() {
+        let dir = temp_dir("help-focus-rows");
+        let app = App::new(metadata_for(&dir), &[], false);
+
+        let rendered = app
+            .pane_focus_help_rows()
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("Ctrl-P"), "got: {}", rendered);
+        assert!(rendered.contains("focus prompts"), "got: {}", rendered);
+        assert!(rendered.contains("Ctrl-W"), "got: {}", rendered);
+        assert!(rendered.contains("focus workspace"), "got: {}", rendered);
+        assert!(!rendered.contains("Ctrl-1"), "got: {}", rendered);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn restored_message_count_ignores_system_and_tool_messages() {
         let messages = vec![
             Message::System {
@@ -1207,6 +1302,55 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_h_toggles_hint_mode_without_editing_composer() {
+        let dir = temp_dir("hint-toggle-h");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::None));
+        assert!(app.hint_visible);
+        assert_eq!(app.prompt(), "");
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::None));
+        assert!(!app.hint_visible);
+        assert_eq!(app.prompt(), "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repeat_ctrl_h_is_ignored() {
+        let dir = temp_dir("hint-toggle-repeat");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.hint_visible = true;
+
+        let action = app.handle_key_event(KeyEvent {
+            code: KeyCode::Char('h'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Repeat,
+            state: KeyEventState::NONE,
+        });
+
+        assert!(matches!(action, AppAction::None));
+        assert!(app.hint_visible);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hint_toggle_requests_scroll_reset() {
+        let dir = temp_dir("hint-scroll-reset");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::None));
+        assert!(app.hint_visible);
+        assert!(app.suppressing_mouse_scroll());
+        app.suppress_mouse_scroll_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(!app.suppressing_mouse_scroll());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn ctrl_e_toggles_events_focus() {
         let dir = temp_dir("events-focus");
         let mut app = App::new(metadata_for(&dir), &[], false);
@@ -1271,6 +1415,27 @@ mod tests {
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert!(matches!(action, AppAction::None));
         assert!(matches!(app.screen, ScreenMode::Focused(FocusPanel::Tools)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn title_badges_show_expected_bindings() {
+        let dir = temp_dir("hint-title-badges");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.complete_top_level_response("one".to_string(), Duration::from_secs(1));
+        app.complete_top_level_response("two".to_string(), Duration::from_secs(2));
+        app.hint_visible = true;
+
+        let prompt_title = line_to_plain_text(&app.prompt_panel_title());
+        assert!(prompt_title.contains("C-P"), "got: {}", prompt_title);
+
+        let workspace_title =
+            line_to_plain_text(&app.static_focus_title(FocusPanel::Workspace, "WORKSPACE"));
+        assert!(workspace_title.contains("C-W"), "got: {}", workspace_title);
+        assert!(!workspace_title.contains('/'), "got: {}", workspace_title);
+
+        let previous_title = line_to_plain_text(&app.render_previous_title_for_test());
+        assert!(previous_title.contains("C-G"), "got: {}", previous_title);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1348,35 +1513,6 @@ mod tests {
             app.screen,
             ScreenMode::Focused(FocusPanel::Worksets)
         ));
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn numeric_shortcuts_focus_new_panels() {
-        let dir = temp_dir("numeric-focus-panels");
-        let mut app = App::new(metadata_for(&dir), &[], false);
-        app.complete_top_level_response("one".to_string(), Duration::from_secs(1));
-        app.complete_top_level_response("two".to_string(), Duration::from_secs(2));
-
-        let cases = vec![
-            ('1', FocusPanel::Prompt),
-            ('2', FocusPanel::Events),
-            ('3', FocusPanel::Threads),
-            ('4', FocusPanel::Response),
-            ('5', FocusPanel::PreviousResponse),
-            ('6', FocusPanel::Tools),
-            ('7', FocusPanel::Terminals),
-            ('8', FocusPanel::Worksets),
-            ('9', FocusPanel::FileChanges),
-        ];
-
-        for (key, expected) in cases {
-            let action =
-                app.handle_key_event(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL));
-            assert!(matches!(action, AppAction::None));
-            assert!(matches!(app.screen, ScreenMode::Focused(panel) if panel == expected));
-        }
-
         let _ = std::fs::remove_dir_all(dir);
     }
 

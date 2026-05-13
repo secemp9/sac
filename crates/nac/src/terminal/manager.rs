@@ -22,7 +22,7 @@ struct ManagedTerminal {
     kind: SessionKind,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionKind {
     Ephemeral,
     Named,
@@ -75,6 +75,15 @@ impl TerminalManager {
         sandbox: Option<&SandboxSession>,
         kind: SessionKind,
     ) -> Result<TerminalInfo> {
+        tracing::debug!(
+            terminal_name = %name,
+            cwd = ?cwd,
+            cols,
+            rows,
+            sandbox = sandbox.is_some(),
+            kind = ?kind,
+            "creating terminal session"
+        );
         let session = TerminalSession::spawn(name.clone(), cwd, cols, rows, sandbox)?;
         let info = self.session_info(&name, &session);
         let (old, evicted) = {
@@ -123,6 +132,16 @@ impl TerminalManager {
             let _ = s.kill().await;
         }
 
+        tracing::info!(
+            terminal_name = %info.name,
+            cols = info.cols,
+            rows = info.rows,
+            alive = info.alive,
+            pid = ?info.pid,
+            command_state = ?info.command_state,
+            "terminal session ready"
+        );
+
         Ok(info)
     }
 
@@ -135,6 +154,14 @@ impl TerminalManager {
     ) -> Result<TerminalOutput> {
         let start = Instant::now();
         let bytes = parse_keys(input);
+        tracing::debug!(
+            terminal_name = %name,
+            input_len = input.len(),
+            parsed_bytes = bytes.len(),
+            yield_ms,
+            max_output,
+            "writing terminal input"
+        );
 
         {
             let mut sessions = self.sessions.lock().await;
@@ -187,6 +214,15 @@ impl TerminalManager {
         };
 
         let (output_text, truncated) = head_tail_truncate(&output, max_output);
+        tracing::info!(
+            terminal_name = %name,
+            wall_time_ms = start.elapsed().as_millis() as u64,
+            output_len = output.len(),
+            truncated,
+            exit_code = ?exit_code,
+            session_name = ?session_name,
+            "terminal input completed"
+        );
         Ok(TerminalOutput {
             output: output_text,
             exit_code,
@@ -207,6 +243,14 @@ impl TerminalManager {
         sandbox: Option<&SandboxSession>,
     ) -> Result<TerminalOutput> {
         let start = Instant::now();
+        tracing::debug!(
+            command = %cmd,
+            cwd = ?cwd,
+            yield_ms,
+            max_output,
+            sandbox = sandbox.is_some(),
+            "executing one-shot terminal command"
+        );
         let outcome = run_pipe_command(cmd, cwd, Duration::from_millis(yield_ms), sandbox).await?;
         let (exit_code, combined) = match outcome {
             PipeCommandOutcome::Completed(output) => {
@@ -224,6 +268,14 @@ impl TerminalManager {
         };
 
         let (output_text, truncated) = head_tail_truncate(&combined, max_output);
+        tracing::info!(
+            command = %cmd,
+            wall_time_ms = start.elapsed().as_millis() as u64,
+            output_len = combined.len(),
+            truncated,
+            exit_code = ?exit_code,
+            "one-shot terminal command completed"
+        );
         Ok(TerminalOutput {
             output: output_text,
             exit_code,
@@ -234,6 +286,7 @@ impl TerminalManager {
     }
 
     pub async fn remove(&self, name: &str) -> Result<()> {
+        tracing::debug!(terminal_name = %name, "removing terminal session");
         let session = {
             let mut sessions = self.sessions.lock().await;
             sessions.remove(name).map(|managed| managed.session)
@@ -245,6 +298,7 @@ impl TerminalManager {
     }
 
     pub async fn remove_all(&self) {
+        tracing::debug!("removing all terminal sessions");
         let sessions: Vec<TerminalSession> = {
             let mut sessions = self.sessions.lock().await;
             sessions

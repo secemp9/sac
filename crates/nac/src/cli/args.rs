@@ -62,7 +62,7 @@ pub(super) struct UiArgs {
     pub(super) full: bool,
 }
 
-#[derive(clap::Args, Default)]
+#[derive(clap::Args, Default, Clone)]
 pub(super) struct ModelArgs {
     /// Backend wire shape to use for model requests
     #[arg(long, value_enum)]
@@ -158,6 +158,9 @@ pub(super) struct ResumeCli {
 
     #[command(flatten)]
     pub(super) ui: UiArgs,
+
+    #[command(flatten)]
+    pub(super) model: ModelArgs,
 }
 
 #[derive(Parser)]
@@ -173,6 +176,8 @@ pub(super) enum ConfigCommand {
     Init,
     /// Print the config file path
     Path,
+    /// Print the current process log file path
+    LogPath,
     /// Print the current config file contents
     Show,
     /// Reload and validate configuration for this invocation
