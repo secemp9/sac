@@ -27,11 +27,20 @@ pub(super) async fn commit_managed_worker_episode(
     action: String,
     response: &str,
 ) -> Result<()> {
+    tracing::debug!(
+        session_id = %session_id,
+        thread_name = %thread_name,
+        action_len = action.len(),
+        response_len = response.len(),
+        store_path = %store_path.display(),
+        "committing managed worker episode"
+    );
     let response = response.to_string();
     tokio::task::spawn_blocking(move || {
         store::append_episode(&store_path, &session_id, &thread_name, &action, &response)
     })
     .await??;
+    tracing::info!("managed worker episode committed");
     Ok(())
 }
 
@@ -44,9 +53,21 @@ pub(super) async fn run_managed_worker(run_config: ManagedWorkerRunConfig) -> Re
         action,
     } = run_config;
 
+    tracing::info!(
+        session_id = %session_id,
+        thread_name = %thread_name,
+        action_len = action.len(),
+        store_path = %store_path.display(),
+        "managed worker starting"
+    );
+
     let send_result = agent.send(&action).await;
     let response = send_result?;
     commit_managed_worker_episode(store_path, session_id, thread_name, action, &response).await?;
+    tracing::info!(
+        response_len = response.len(),
+        "managed worker completed successfully"
+    );
     println!("{}", response);
     Ok(())
 }

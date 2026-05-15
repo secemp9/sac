@@ -34,6 +34,12 @@ pub enum AgentEvent {
         action: String,
         source_threads: Vec<String>,
     },
+    ThreadSpawned {
+        name: String,
+        executable: String,
+        cwd: String,
+        sandboxed: bool,
+    },
     ThreadLog {
         name: String,
         line: String,

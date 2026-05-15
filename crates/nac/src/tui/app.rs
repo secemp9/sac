@@ -1164,6 +1164,23 @@ impl App {
                 };
                 self.push_timeline(name, detail, Tone::Success);
             }
+            AgentEvent::ThreadSpawned {
+                name,
+                executable,
+                cwd,
+                sandboxed,
+            } => {
+                self.push_timeline(
+                    name,
+                    format!(
+                        "thread spawned • exe={} • cwd={} • sandbox={} ",
+                        fit_text(&executable, 48),
+                        fit_text(&cwd, 40),
+                        if sandboxed { "on" } else { "off" }
+                    ),
+                    Tone::Muted,
+                );
+            }
             AgentEvent::ThreadLog { name, line } => {
                 self.push_timeline(name, format!("log • {}", fit_text(&line, 110)), Tone::Muted);
             }

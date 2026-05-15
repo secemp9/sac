@@ -45,7 +45,7 @@ pub fn threads_definition() -> ToolDefinition {
     use serde_json::json;
     def(
         "threads",
-        "List active threads in the current orchestrator session.",
+        "List retained thread lanes in the current orchestrator session. This reports persisted thread history, not whether a worker process is actively running right now.",
         json!({
             "type": "object",
             "properties": {}
@@ -267,16 +267,26 @@ pub async fn execute_threads(runtime: &ToolRuntime) -> ToolResult {
 
     if threads.is_empty() {
         return ToolResult {
-            content: "No active threads in this session.".to_string(),
+            content: "No retained threads in this session.".to_string(),
             is_error: false,
         };
     }
 
-    let mut output = String::from("Active threads:");
+    let active_threads = runtime.active_threads.lock().await.clone();
+
+    let mut output = String::from("Retained threads:");
     for thread in threads {
         output.push_str(&format!(
-            "\n- {} | {} episodes | created {} | updated {}",
-            thread.name, thread.episode_count, thread.created_at, thread.updated_at
+            "\n- {} | {} episodes | status: {} | created {} | updated {}",
+            thread.name,
+            thread.episode_count,
+            if active_threads.contains(&thread.name) {
+                "running"
+            } else {
+                "idle"
+            },
+            thread.created_at,
+            thread.updated_at
         ));
         if let Some(action) = thread.latest_action.as_deref() {
             output.push_str(&format!(" | last action: {}", action));
@@ -492,7 +502,9 @@ impl WorkerTimeoutTrace {
             AgentEvent::Error { .. }
             | AgentEvent::ThreadLog { .. }
             | AgentEvent::TerminalSnapshot { .. } => {}
-            AgentEvent::ThreadStarted { .. } | AgentEvent::ThreadFinished { .. } => {}
+            AgentEvent::ThreadStarted { .. }
+            | AgentEvent::ThreadSpawned { .. }
+            | AgentEvent::ThreadFinished { .. } => {}
         }
     }
 
@@ -550,6 +562,18 @@ async fn run_worker(
     timeout_secs: u64,
 ) -> std::io::Result<WorkerRun> {
     let executable = std::env::current_exe()?;
+    let executable_display = executable.display().to_string();
+    let cwd = std::env::current_dir()?;
+    tracing::debug!(
+        thread_name = %thread_name,
+        session_id = %session_id,
+        executable = %executable_display,
+        cwd = %cwd.display(),
+        sandboxed = runtime.sandbox.is_some(),
+        source_threads = ?source_threads,
+        timeout_secs,
+        "resolved managed worker spawn context"
+    );
     let mut command = Command::new(executable);
     command
         .arg("__worker")
@@ -582,7 +606,31 @@ async fn run_worker(
     }
     isolate_process_group(&mut command);
 
-    let mut child = command.spawn()?;
+    let mut child = command.spawn().map_err(|error| {
+        tracing::error!(
+            thread_name = %thread_name,
+            session_id = %session_id,
+            executable = %executable_display,
+            cwd = %cwd.display(),
+            sandboxed = runtime.sandbox.is_some(),
+            error = %error,
+            "managed worker spawn failed"
+        );
+        error
+    })?;
+
+    runtime.event_sink.emit(AgentEvent::ThreadSpawned {
+        name: thread_name.to_string(),
+        executable: executable_display.clone(),
+        cwd: cwd.display().to_string(),
+        sandboxed: runtime.sandbox.is_some(),
+    });
+    tracing::info!(
+        thread_name = %thread_name,
+        session_id = %session_id,
+        pid = ?child.id(),
+        "managed worker process spawned"
+    );
 
     let timeout_trace = Arc::new(Mutex::new(WorkerTimeoutTrace::default()));
     let stderr = child.stderr.take().unwrap();
