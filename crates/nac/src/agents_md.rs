@@ -54,9 +54,12 @@ impl AgentsMdBundle {
         }
 
         if let Some(workspace_dir) = workspace_dir {
-            let root =
-                find_project_root(workspace_dir).unwrap_or_else(|| workspace_dir.to_path_buf());
-            for dir in dirs_from_root_to_scope(&root, workspace_dir) {
+            let dirs = if let Some(root) = find_project_root(workspace_dir) {
+                dirs_from_root_to_scope(&root, workspace_dir)
+            } else {
+                vec![workspace_dir.to_path_buf()]
+            };
+            for dir in dirs {
                 let mut names = vec!["AGENTS.override.md", "AGENTS.md"];
                 for fallback in &settings.fallback_filenames {
                     names.push(fallback.as_str());
@@ -231,7 +234,7 @@ fn load_settings() -> AgentsMdSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_ENV_LOCK;
+    use crate::test_env_lock;
     use std::env;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -247,7 +250,7 @@ mod tests {
 
     #[test]
     fn loads_global_and_project_files_in_order() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let root = temp_dir("hierarchy");
         let nac_home = root.join("nac-home");
         let project_root = root.join("repo");
@@ -296,8 +299,8 @@ mod tests {
     }
 
     #[test]
-    fn non_git_scope_only_loads_current_directory_file() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+    fn non_git_scope_walks_parent_to_child_without_git_root() {
+        let _guard = test_env_lock();
         let root = temp_dir("non_git");
         let parent = root.join("parent");
         let child = parent.join("child");
@@ -311,7 +314,7 @@ mod tests {
             .iter()
             .map(|file| file.content.as_str())
             .collect();
-        assert_eq!(contents, vec!["child"]);
+        assert_eq!(contents, vec!["parent", "child"]);
     }
 
     #[test]
@@ -346,7 +349,7 @@ mod tests {
 
     #[test]
     fn project_fallback_filenames_are_respected() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let root = temp_dir("fallback_names");
         let nac_home = root.join("nac-home");
         let project = root.join("repo");

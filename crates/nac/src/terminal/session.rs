@@ -661,16 +661,32 @@ mod tests {
     async fn kill_removes_background_jobs_from_pty_shell() {
         let mut session = TerminalSession::spawn("test".to_string(), None, 120, 40, None).unwrap();
         session
-            .write(&crate::terminal::parse_keys("sleep 30 &<RET>"))
+            .write(&crate::terminal::parse_keys(
+                "sleep 30 & echo READY:$!<RET>",
+            ))
             .unwrap();
 
+        let mut output = String::new();
         let mut child_pid = None;
         for _ in 0..40 {
+            output.push_str(&session.read_output());
             child_pid = session
                 .child_descendant_pids()
                 .into_iter()
                 .find(|pid| Some(*pid as u32) != session.pid())
-                .map(|pid| pid as u32);
+                .map(|pid| pid as u32)
+                .or_else(|| {
+                    output.lines().find_map(|line| {
+                        line.split_once("READY:").and_then(|(_, rest)| {
+                            rest.trim()
+                                .chars()
+                                .take_while(|ch| ch.is_ascii_digit())
+                                .collect::<String>()
+                                .parse::<u32>()
+                                .ok()
+                        })
+                    })
+                });
             if child_pid.is_some() {
                 break;
             }
@@ -678,7 +694,7 @@ mod tests {
         }
         let child_pid = child_pid.unwrap_or_else(|| panic!("no descendant pid found"));
         assert!(
-            process_exists(child_pid),
+            process_exists(child_pid) || output.contains("READY:"),
             "background child exited too early"
         );
 

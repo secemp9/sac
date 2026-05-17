@@ -24,21 +24,21 @@ impl Tone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ThreadState {
     Active,
-    Idle,
+    Retained,
 }
 
 impl ThreadState {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Active => "ACTIVE",
-            Self::Idle => "IDLE",
+            Self::Retained => "RETAINED",
         }
     }
 
     pub(super) fn tone(self) -> Tone {
         match self {
             Self::Active => Tone::Success,
-            Self::Idle => Tone::Muted,
+            Self::Retained => Tone::Muted,
         }
     }
 }

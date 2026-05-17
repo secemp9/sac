@@ -18,6 +18,11 @@ pub(super) fn parse_slash_command(prompt: &str) -> Option<Result<SlashCommand, S
     let name_end = body.find(char::is_whitespace).unwrap_or(body.len());
     let name = &body[..name_end];
     let args = body[name_end..].trim();
+    tracing::debug!(
+        command = name,
+        args_len = args.len(),
+        "parsing slash command"
+    );
 
     Some(match name {
         "exit" if args.is_empty() => Ok(SlashCommand::Exit),
@@ -58,8 +63,18 @@ pub(super) fn parse_run_slash_command(args: &str) -> Result<SlashCommand, String
 
 pub(super) fn expand_user_prompt(prompt: &str) -> String {
     match parse_slash_command(prompt) {
-        Some(Ok(SlashCommand::Plan { instruction })) => build_plan_command_prompt(&instruction),
-        Some(Ok(SlashCommand::Run { workset_id })) => build_run_command_prompt(&workset_id),
+        Some(Ok(SlashCommand::Plan { instruction })) => {
+            tracing::info!(
+                command = "/plan",
+                instruction_len = instruction.len(),
+                "expanding slash command into plan prompt"
+            );
+            build_plan_command_prompt(&instruction)
+        }
+        Some(Ok(SlashCommand::Run { workset_id })) => {
+            tracing::info!(command = "/run", workset_id = %workset_id, "expanding slash command into run prompt");
+            build_run_command_prompt(&workset_id)
+        }
         _ => prompt.to_string(),
     }
 }

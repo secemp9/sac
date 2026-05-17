@@ -233,6 +233,7 @@ impl App {
                 return AppAction::None;
             }
             self.hint_visible = !self.hint_visible;
+            tracing::debug!(hint_visible = self.hint_visible, key = ?key.code, "tui hint visibility toggled");
             return AppAction::None;
         }
 
@@ -258,6 +259,7 @@ impl App {
                     ..
                 } => {
                     self.help_visible = false;
+                    tracing::debug!("tui help overlay hidden");
                     AppAction::None
                 }
                 _ => AppAction::None,
@@ -280,6 +282,7 @@ impl App {
                 self.selection = None;
                 self.hint_visible = false;
                 self.help_visible = true;
+                tracing::debug!("tui help overlay shown from empty composer");
                 AppAction::None
             }
             _ if pane_focus_panel_for_key(key).is_some() => {
@@ -297,6 +300,7 @@ impl App {
                     self.selection = None;
                 }
                 self.screen = ScreenMode::Dashboard;
+                tracing::debug!("tui focus cleared back to dashboard");
                 AppAction::None
             }
             // Navigation in focused Threads mode
@@ -421,16 +425,21 @@ impl App {
                 if let Some(command) = parse_slash_command(&prompt) {
                     match command {
                         Ok(SlashCommand::Exit) => {
+                            tracing::info!(command = "/exit", "slash command accepted");
                             self.quit = true;
                             return AppAction::Quit;
                         }
                         Ok(SlashCommand::Sessions) => {
+                            tracing::info!(command = "/sessions", "slash command accepted");
                             self.open_session_picker(false);
                             self.clear_composer();
                             return AppAction::None;
                         }
-                        Ok(SlashCommand::Plan { .. } | SlashCommand::Run { .. }) => {}
+                        Ok(SlashCommand::Plan { .. } | SlashCommand::Run { .. }) => {
+                            tracing::info!(prompt = %prompt, "slash command accepted for expanded submission");
+                        }
                         Err(message) => {
+                            tracing::warn!(prompt = %prompt, error = %message, "slash command rejected");
                             self.show_composer_notice(message, Tone::Warning);
                             return AppAction::None;
                         }
@@ -693,6 +702,11 @@ impl App {
         self.selection = None;
         self.hint_visible = false;
         self.screen = ScreenMode::SessionPicker { startup };
+        tracing::debug!(
+            startup,
+            session_count = self.session_picker.sessions.len(),
+            "tui session picker opened"
+        );
     }
 
     pub(super) fn is_hint_toggle_key(&self, key: KeyEvent) -> bool {
@@ -797,6 +811,7 @@ impl App {
     }
 
     pub(super) fn toggle_focus_panel(&mut self, panel: FocusPanel) {
+        let before = self.screen;
         let was_prompt_focused = matches!(self.screen, ScreenMode::Focused(FocusPanel::Prompt));
         let was_response_focused = matches!(self.screen, ScreenMode::Focused(FocusPanel::Response));
         self.selection = None;
@@ -834,6 +849,7 @@ impl App {
         {
             self.select_latest_response();
         }
+        tracing::debug!(from = ?before, to = ?self.screen, target = ?panel, "tui focus panel toggled");
     }
 
     pub(super) fn primary_scroll_panel(&self) -> PanelId {
@@ -873,6 +889,7 @@ impl App {
 
     pub(super) fn refresh_session_picker(&mut self) {
         let store_path = self.metadata.store_path.clone();
+        tracing::debug!(store_path = %store_path.display(), "refreshing tui session picker");
         match tokio::task::block_in_place(move || sessions::list_sessions(&store_path)) {
             Ok(sessions) => {
                 let current_session = self.metadata.session_id.as_deref();
@@ -887,11 +904,17 @@ impl App {
                 self.session_picker.selected =
                     selected.min(self.session_picker.sessions.len().saturating_sub(1));
                 self.session_picker.error = None;
+                tracing::info!(
+                    session_count = self.session_picker.sessions.len(),
+                    selected = self.session_picker.selected,
+                    "tui session picker refreshed"
+                );
             }
             Err(error) => {
                 self.session_picker.sessions.clear();
                 self.session_picker.selected = 0;
                 self.session_picker.error = Some(error.to_string());
+                tracing::error!(error = %error, "tui session picker refresh failed");
             }
         }
     }
@@ -900,6 +923,7 @@ impl App {
         let Some(session_id) = self.metadata.session_id.as_deref() else {
             return;
         };
+        tracing::debug!(session_id = %session_id, store_path = %self.metadata.store_path.display(), "hydrating threads from store into tui state");
         let Ok(threads) = tokio::task::block_in_place(|| {
             store::list_threads(&self.metadata.store_path, session_id)
         }) else {
@@ -917,13 +941,13 @@ impl App {
                         .latest_action
                         .clone()
                         .unwrap_or_else(|| "retained history".to_string()),
-                    state: ThreadState::Idle,
+                    state: ThreadState::Retained,
                     updated_at: short_clock(&thread.updated_at),
                     updated_at_ts: ts,
                     episodes: thread.episode_count,
                     summary: format!("{} episode(s)", thread.episode_count),
                 });
-            if matches!(entry.state, ThreadState::Idle) {
+            if matches!(entry.state, ThreadState::Retained) {
                 if let Some(action) = thread.latest_action {
                     entry.action = action;
                 }
@@ -934,24 +958,39 @@ impl App {
                 entry.summary = format!("{} episode(s)", thread.episode_count);
             }
         }
+        tracing::info!(
+            thread_count = self.threads.len(),
+            "tui threads hydrated from store"
+        );
     }
 
     pub(super) fn hydrate_all_episodes(&mut self) {
         let Some(session_id) = self.metadata.session_id.as_deref() else {
             return;
         };
+        tracing::debug!(session_id = %session_id, store_path = %self.metadata.store_path.display(), "hydrating all retained episodes into tui state");
         if let Ok(episodes) = tokio::task::block_in_place(|| {
             store::load_all_episodes(&self.metadata.store_path, session_id)
         }) {
             self.all_episodes = episodes;
+            tracing::info!(
+                thread_count = self.all_episodes.len(),
+                "tui all-episodes hydration complete"
+            );
         }
         self.episode_markdown_cache.clear();
     }
 
     pub(super) fn refresh_worksets(&mut self) {
+        tracing::debug!(session_id = ?self.metadata.session_id, store_path = %self.metadata.store_path.display(), "refreshing tui worksets from store");
         self.worksets = WorksetSnapshot::load(
             &self.metadata.store_path,
             self.metadata.session_id.as_deref(),
+        );
+        tracing::info!(
+            workset_count = self.worksets.items.len(),
+            has_error = self.worksets.error.is_some(),
+            "tui worksets refreshed"
         );
     }
 
@@ -966,6 +1005,7 @@ impl App {
         if self.workspace_refresh_pending {
             return;
         }
+        tracing::debug!(cwd = %self.metadata.cwd, inspect_root = ?self.inspect_root, "tui workspace refresh requested");
         let tx = match &self.workspace_tx {
             Some(tx) => tx.clone(),
             None => return,
@@ -1202,13 +1242,13 @@ impl App {
                     .or_insert_with(|| ThreadView {
                         name: name.clone(),
                         action: "thread run".to_string(),
-                        state: ThreadState::Idle,
+                        state: ThreadState::Retained,
                         updated_at: utc_hms(),
                         updated_at_ts: current_unix_ts(),
                         episodes: 0,
                         summary: String::new(),
                     });
-                entry.state = ThreadState::Idle;
+                entry.state = ThreadState::Retained;
                 entry.updated_at = utc_hms();
                 entry.updated_at_ts = current_unix_ts();
                 entry.summary = if timed_out {
@@ -1476,6 +1516,10 @@ impl App {
             self.selection = None;
             self.panel_scrolls.insert(PanelId::Response, 0);
             self.panel_scrolls.insert(PanelId::PreviousResponse, 0);
+            tracing::debug!(
+                selected_response = new_selected,
+                "tui moved to older response"
+            );
         }
     }
 
@@ -1492,6 +1536,10 @@ impl App {
             self.selection = None;
             self.panel_scrolls.insert(PanelId::Response, 0);
             self.panel_scrolls.insert(PanelId::PreviousResponse, 0);
+            tracing::debug!(
+                selected_response = new_selected,
+                "tui moved to newer response"
+            );
         }
     }
 
@@ -2859,12 +2907,12 @@ impl App {
 
             let state_icon = match thread.state {
                 ThreadState::Active => "●",
-                ThreadState::Idle => "○",
+                ThreadState::Retained => "○",
             };
 
             let state_color = match thread.state {
                 ThreadState::Active => Color::Green,
-                ThreadState::Idle => Color::Gray,
+                ThreadState::Retained => Color::Gray,
             };
 
             let display_name = fit_text(name, max_name_width);

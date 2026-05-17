@@ -473,7 +473,7 @@ mod tests {
         ThreadView {
             name: name.to_string(),
             action: format!("inspect {name}"),
-            state: ThreadState::Idle,
+            state: ThreadState::Retained,
             updated_at: format!("00:00:{updated_at_ts:02}"),
             updated_at_ts,
             episodes: 1,
@@ -1537,7 +1537,7 @@ mod tests {
             timeout_reason: None,
         });
         let thread = app.threads.get("auth").unwrap();
-        assert_eq!(thread.state, ThreadState::Idle);
+        assert_eq!(thread.state, ThreadState::Retained);
         assert_eq!(thread.summary, "exit 0");
         let _ = std::fs::remove_dir_all(dir);
     }
