@@ -1,6 +1,14 @@
 use super::*;
 
 pub fn define_workset(path: &Path, session_id: &str, workset: &WorksetDefinition) -> Result<()> {
+    tracing::debug!(
+        db_path = %path.display(),
+        session_id = %session_id,
+        workset_id = %workset.id,
+        item_count = workset.items.len(),
+        status = %workset.status,
+        "defining workset"
+    );
     let mut conn = open_connection(path)?;
     let tx = conn.transaction()?;
     let now = now_utc();
@@ -72,10 +80,12 @@ pub fn define_workset(path: &Path, session_id: &str, workset: &WorksetDefinition
     }
 
     tx.commit()?;
+    tracing::info!(db_path = %path.display(), session_id = %session_id, workset_id = %workset.id, item_count = workset.items.len(), "workset defined");
     Ok(())
 }
 
 pub fn read_workset(path: &Path, session_id: &str, id: &str) -> Result<Option<WorksetRecord>> {
+    tracing::debug!(db_path = %path.display(), session_id = %session_id, workset_id = %id, "reading workset");
     let conn = open_connection(path)?;
     let Some(mut workset) = conn
         .query_row(
@@ -87,13 +97,16 @@ pub fn read_workset(path: &Path, session_id: &str, id: &str) -> Result<Option<Wo
         )
         .optional()?
     else {
+        tracing::info!(db_path = %path.display(), session_id = %session_id, workset_id = %id, "workset not found");
         return Ok(None);
     };
     workset.items = load_workset_items(&conn, session_id, id)?;
+    tracing::info!(db_path = %path.display(), session_id = %session_id, workset_id = %id, item_count = workset.items.len(), "workset read");
     Ok(Some(workset))
 }
 
 pub fn list_worksets(path: &Path, session_id: &str) -> Result<Vec<WorksetSummary>> {
+    tracing::debug!(db_path = %path.display(), session_id = %session_id, "listing worksets");
     let conn = open_connection(path)?;
     let sql = "SELECT w.id, w.status, w.summary,
                (SELECT COUNT(*) FROM workset_items i
@@ -115,6 +128,7 @@ pub fn list_worksets(path: &Path, session_id: &str) -> Result<Vec<WorksetSummary
             updated_at: row.get(4)?,
         });
     }
+    tracing::info!(db_path = %path.display(), session_id = %session_id, workset_count = worksets.len(), "listed worksets");
     Ok(worksets)
 }
 

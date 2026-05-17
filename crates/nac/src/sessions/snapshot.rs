@@ -63,6 +63,16 @@ pub fn new_snapshot(
     sandbox_spec: Option<SandboxSpec>,
     messages: Vec<Message>,
 ) -> SessionSnapshot {
+    tracing::debug!(
+        session_id = %session_id,
+        cwd = %cwd.display(),
+        store_path = %store_path.display(),
+        model = %model,
+        backend = ?backend,
+        message_count = messages.len(),
+        sandboxed = sandbox_spec.is_some(),
+        "constructing new session snapshot"
+    );
     let now = now_utc();
     SessionSnapshot {
         session_id,
@@ -89,6 +99,16 @@ pub fn refresh_snapshot(
     previous_response_duration_ms: Option<u64>,
     response_durations_ms: Option<Vec<Option<u64>>>,
 ) -> SessionSnapshot {
+    tracing::debug!(
+        session_id = %snapshot.session_id,
+        cwd = %snapshot.cwd.display(),
+        store_path = %snapshot.store_path.display(),
+        model = %snapshot.model,
+        backend = ?snapshot.backend,
+        message_count = messages.len(),
+        sandboxed = snapshot.sandbox_spec.is_some(),
+        "refreshing session snapshot"
+    );
     SessionSnapshot {
         session_id: snapshot.session_id.clone(),
         cwd: snapshot.cwd.clone(),

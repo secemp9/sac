@@ -24,6 +24,7 @@ pub(super) async fn build_resume_picker_config(
     let workspace_host_path = Some(current_dir.clone());
     let sandbox_status = "off".to_string();
     let agents_md_status = agents_md.status_text();
+    let worker_executable = resolve_worker_executable_path()?;
     let store_path = absolute_store_path(
         &current_dir,
         cli.store
@@ -46,6 +47,7 @@ pub(super) async fn build_resume_picker_config(
             mode: AgentMode::Orchestrator,
             store_path: store_path.clone(),
             session_id: None,
+            worker_executable: Some(worker_executable),
             initial_messages: Vec::new(),
             thread_name: None,
             event_sink: EventSink::none(),
@@ -149,6 +151,14 @@ async fn build_resume_config_from_snapshot(
     );
     std::env::set_current_dir(&snapshot.cwd)?;
     let current_dir = std::env::current_dir()?;
+    let worker_executable = resolve_worker_executable_path().with_context(|| {
+        format!(
+            "failed to validate worker executable while resuming session '{}' (cwd: {}, store: {})",
+            snapshot.session_id,
+            snapshot.cwd.display(),
+            snapshot.store_path.display()
+        )
+    })?;
     let client = ModelClient::from_env_with_overrides(ClientOverrides {
         base_url: model_args
             .api_base_url
@@ -194,6 +204,7 @@ async fn build_resume_config_from_snapshot(
         backend = ?client.backend(),
         model = %client.model,
         base_url = %client.base_url(),
+        worker_executable = %worker_executable.display(),
         sandbox_status = %sandbox_status,
         agents_md_status = %agents_md_status,
         restored_messages = snapshot.messages.len(),
@@ -207,6 +218,7 @@ async fn build_resume_config_from_snapshot(
             mode: AgentMode::Orchestrator,
             store_path: snapshot.store_path.clone(),
             session_id: Some(snapshot.session_id.clone()),
+            worker_executable: Some(worker_executable),
             initial_messages: Vec::new(),
             thread_name: None,
             event_sink: EventSink::none(),

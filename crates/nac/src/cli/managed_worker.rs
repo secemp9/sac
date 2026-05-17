@@ -51,6 +51,7 @@ pub(super) async fn run_managed_worker(run_config: ManagedWorkerRunConfig) -> Re
         session_id,
         thread_name,
         action,
+        ..
     } = run_config;
 
     tracing::info!(

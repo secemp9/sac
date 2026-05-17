@@ -32,7 +32,7 @@ use usage::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_ENV_LOCK;
+    use crate::test_env_lock;
     use std::ffi::OsString;
 
     fn restore_env(name: &str, value: Option<OsString>) {
@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn test_missing_api_key_error() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
 
         let original = std::env::var("OPENAI_API_KEY").ok();
         unsafe {
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn explicit_deepseek_backend_defaults_to_deepseek_url_and_model() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
 
         let original_openai_key = std::env::var_os("OPENAI_API_KEY");
         let original_base_url = std::env::var_os("OPENAI_BASE_URL");
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn config_api_key_is_used_when_env_is_missing() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
 
         let original_openai_key = std::env::var_os("OPENAI_API_KEY");
         let original_base_url = std::env::var_os("OPENAI_BASE_URL");
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn config_api_key_beats_standard_env_api_key() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
 
         let original_openai_key = std::env::var_os("OPENAI_API_KEY");
         let original_base_url = std::env::var_os("OPENAI_BASE_URL");
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn config_api_key_env_beats_standard_env_api_key() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
 
         let original_openai_key = std::env::var_os("OPENAI_API_KEY");
         let original_alt_key = std::env::var_os("ALT_KEY");

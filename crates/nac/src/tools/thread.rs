@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use tracing::Instrument;
 
 use crate::events::{decode_stderr_event, AgentEvent};
 use crate::model::ModelClient;
@@ -104,140 +105,152 @@ pub async fn execute_dispatch(
         Ok(s) => s.to_string(),
         Err(e) => return e,
     };
-
-    if !mark_thread_active(runtime, &thread_name).await {
-        tracing::warn!(thread_name = %thread_name, "thread dispatch rejected because thread is already active");
-        return ToolResult {
-            content: format!(
-                "Thread '{}' is already running; retry after the current dispatch completes.",
-                thread_name
-            ),
-            is_error: true,
-        };
-    }
-
     let timeout_secs = resolve_thread_timeout_secs(&args, runtime.thread_timeout_secs);
-    tracing::info!(
-        session_id = %session_id,
-        thread_name = %thread_name,
-        action_len = action.len(),
-        source_threads = ?source_threads,
-        timeout_secs,
-        backend = ?client.backend(),
-        model = %client.model,
-        base_url = %client.base_url(),
-        "dispatching managed worker thread"
-    );
 
-    runtime.event_sink.emit(AgentEvent::ThreadStarted {
-        name: thread_name.clone(),
-        action: action.clone(),
-        source_threads: source_threads.clone(),
-    });
-
-    let result = run_worker(
-        runtime,
-        client,
-        &session_id,
-        &thread_name,
-        &action,
-        &source_threads,
-        timeout_secs,
-    )
-    .await;
-    unmark_thread_active(runtime, &thread_name).await;
-
-    match result {
-        Err(e) => {
-            tracing::error!(thread_name = %thread_name, error = %e, "failed to spawn managed worker thread");
-            runtime.event_sink.emit(AgentEvent::Error {
-                thread_name: Some(thread_name.clone()),
-                message: format!("Failed to spawn thread '{}': {}", thread_name, e),
-            });
-            ToolResult {
-                content: format!("Failed to spawn thread '{}': {}", thread_name, e),
-                is_error: true,
-            }
-        }
-        Ok(run) if run.timed_out => {
-            tracing::warn!(
-                thread_name = %thread_name,
-                exit_code = run.exit_code,
-                stderr_len = run.stderr.len(),
-                stdout_len = run.stdout.len(),
-                timeout_reason = ?run.timeout_reason,
-                timeout_secs,
-                "managed worker thread timed out"
-            );
-            let timeout_reason = run.timeout_reason.clone();
-            runtime.event_sink.emit(AgentEvent::ThreadFinished {
-                name: thread_name.clone(),
-                exit_code: run.exit_code,
-                timed_out: true,
-                timeout_reason: timeout_reason.clone(),
-            });
-            ToolResult {
-                content: match timeout_reason {
-                    Some(reason) => {
-                        format!(
-                            "Thread '{}' timed out after {}s.\n{}",
-                            thread_name, timeout_secs, reason
-                        )
-                    }
-                    None => format!("Thread '{}' timed out after {}s", thread_name, timeout_secs),
-                },
-                is_error: true,
-            }
-        }
-        Ok(run) if run.exit_code != 0 => {
-            tracing::error!(
-                thread_name = %thread_name,
-                exit_code = run.exit_code,
-                stderr_len = run.stderr.len(),
-                stdout_len = run.stdout.len(),
-                "managed worker thread exited with failure"
-            );
-            runtime.event_sink.emit(AgentEvent::ThreadFinished {
-                name: thread_name.clone(),
-                exit_code: run.exit_code,
-                timed_out: false,
-                timeout_reason: None,
-            });
-            let details = if !run.stderr.trim().is_empty() {
-                run.stderr.trim().to_string()
-            } else if !run.stdout.trim().is_empty() {
-                run.stdout.trim().to_string()
-            } else {
-                "no output".to_string()
-            };
-            ToolResult {
+    async {
+        if !mark_thread_active(runtime, &thread_name).await {
+            tracing::warn!(thread_name = %thread_name, "thread dispatch rejected because thread is already active");
+            return ToolResult {
                 content: format!(
-                    "Thread '{}' failed (exit {}):\n{}",
-                    thread_name, run.exit_code, details
+                    "Thread '{}' is already running; retry after the current dispatch completes.",
+                    thread_name
                 ),
                 is_error: true,
-            }
+            };
         }
-        Ok(run) => {
-            tracing::info!(
-                thread_name = %thread_name,
-                exit_code = run.exit_code,
-                stderr_len = run.stderr.len(),
-                stdout_len = run.stdout.len(),
-                "managed worker thread completed successfully"
-            );
-            runtime.event_sink.emit(AgentEvent::ThreadFinished {
-                name: thread_name.clone(),
-                exit_code: run.exit_code,
-                timed_out: false,
-                timeout_reason: None,
-            });
-            ToolResult {
-                content: run.stdout.trim().to_string(),
-                is_error: false,
+
+        tracing::info!(
+            session_id = %session_id,
+            thread_name = %thread_name,
+            action_len = action.len(),
+            source_threads = ?source_threads,
+            timeout_secs,
+            backend = ?client.backend(),
+            model = %client.model,
+            base_url = %client.base_url(),
+            "dispatching managed worker thread"
+        );
+
+        runtime.event_sink.emit(AgentEvent::ThreadStarted {
+            name: thread_name.clone(),
+            action: action.clone(),
+            source_threads: source_threads.clone(),
+        });
+
+        let result = run_worker(
+            runtime,
+            client,
+            &session_id,
+            &thread_name,
+            &action,
+            &source_threads,
+            timeout_secs,
+        )
+        .await;
+        unmark_thread_active(runtime, &thread_name).await;
+
+        match result {
+            Err(e) => {
+                tracing::error!(thread_name = %thread_name, error = %e, "failed to spawn managed worker thread");
+                runtime.event_sink.emit(AgentEvent::Error {
+                    thread_name: Some(thread_name.clone()),
+                    message: format!("Failed to spawn thread '{}': {}", thread_name, e),
+                });
+                ToolResult {
+                    content: format!("Failed to spawn thread '{}': {}", thread_name, e),
+                    is_error: true,
+                }
+            }
+            Ok(run) if run.timed_out => {
+                tracing::warn!(
+                    thread_name = %thread_name,
+                    exit_code = run.exit_code,
+                    stderr_len = run.stderr.len(),
+                    stdout_len = run.stdout.len(),
+                    timeout_reason = ?run.timeout_reason,
+                    timeout_secs,
+                    "managed worker thread timed out"
+                );
+                let timeout_reason = run.timeout_reason.clone();
+                runtime.event_sink.emit(AgentEvent::ThreadFinished {
+                    name: thread_name.clone(),
+                    exit_code: run.exit_code,
+                    timed_out: true,
+                    timeout_reason: timeout_reason.clone(),
+                });
+                ToolResult {
+                    content: match timeout_reason {
+                        Some(reason) => {
+                            format!(
+                                "Thread '{}' timed out after {}s.\n{}",
+                                thread_name, timeout_secs, reason
+                            )
+                        }
+                        None => format!("Thread '{}' timed out after {}s", thread_name, timeout_secs),
+                    },
+                    is_error: true,
+                }
+            }
+            Ok(run) if run.exit_code != 0 => {
+                tracing::error!(
+                    thread_name = %thread_name,
+                    exit_code = run.exit_code,
+                    stderr_len = run.stderr.len(),
+                    stdout_len = run.stdout.len(),
+                    "managed worker thread exited with failure"
+                );
+                runtime.event_sink.emit(AgentEvent::ThreadFinished {
+                    name: thread_name.clone(),
+                    exit_code: run.exit_code,
+                    timed_out: false,
+                    timeout_reason: None,
+                });
+                let details = if !run.stderr.trim().is_empty() {
+                    run.stderr.trim().to_string()
+                } else if !run.stdout.trim().is_empty() {
+                    run.stdout.trim().to_string()
+                } else {
+                    "no output".to_string()
+                };
+                ToolResult {
+                    content: format!(
+                        "Thread '{}' failed (exit {}):\n{}",
+                        thread_name, run.exit_code, details
+                    ),
+                    is_error: true,
+                }
+            }
+            Ok(run) => {
+                tracing::info!(
+                    thread_name = %thread_name,
+                    exit_code = run.exit_code,
+                    stderr_len = run.stderr.len(),
+                    stdout_len = run.stdout.len(),
+                    "managed worker thread completed successfully"
+                );
+                runtime.event_sink.emit(AgentEvent::ThreadFinished {
+                    name: thread_name.clone(),
+                    exit_code: run.exit_code,
+                    timed_out: false,
+                    timeout_reason: None,
+                });
+                ToolResult {
+                    content: run.stdout.trim().to_string(),
+                    is_error: false,
+                }
             }
         }
     }
+    .instrument(tracing::info_span!(
+        "thread_dispatch",
+        session_id = %session_id,
+        thread_name = %thread_name,
+        source_thread_count = source_threads.len(),
+        timeout_secs,
+        store_path = %runtime.store_path.display(),
+        sandboxed = runtime.sandbox.is_some(),
+    ))
+    .await
 }
 
 pub async fn execute_threads(runtime: &ToolRuntime) -> ToolResult {
@@ -283,7 +296,7 @@ pub async fn execute_threads(runtime: &ToolRuntime) -> ToolResult {
             if active_threads.contains(&thread.name) {
                 "running"
             } else {
-                "idle"
+                "retained"
             },
             thread.created_at,
             thread.updated_at
@@ -561,7 +574,12 @@ async fn run_worker(
     source_threads: &[String],
     timeout_secs: u64,
 ) -> std::io::Result<WorkerRun> {
-    let executable = std::env::current_exe()?;
+    let executable = runtime.worker_executable.clone().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "worker executable path is not configured",
+        )
+    })?;
     let executable_display = executable.display().to_string();
     let cwd = std::env::current_dir()?;
     tracing::debug!(
@@ -763,6 +781,22 @@ mod tests {
         assert_eq!(
             trace.timeout_reason(),
             "The thread timed out at a tool call.\nTool call: exec_command call_123\narguments: {\"cmd\":\"cargo test -p nac\",\"tty\":false,\"yield_time_ms\":300000}"
+        );
+    }
+
+    #[test]
+    fn timeout_trace_ignores_thread_spawned_event() {
+        let mut trace = WorkerTimeoutTrace::default();
+        trace.observe(&AgentEvent::ThreadSpawned {
+            name: "impl/auth".to_string(),
+            executable: "/home/secemp9/.local/bin/nac".to_string(),
+            cwd: "/workspace/project".to_string(),
+            sandboxed: false,
+        });
+
+        assert_eq!(
+            trace.timeout_reason(),
+            "The thread timed out before entering a model API call or tool call."
         );
     }
 }

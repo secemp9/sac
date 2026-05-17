@@ -203,6 +203,8 @@ pub(super) struct ManagedWorkerRunConfig {
     pub(super) session_id: String,
     pub(super) thread_name: String,
     pub(super) action: String,
+    pub(super) working_directory: String,
+    pub(super) sandbox_status: String,
 }
 
 pub(super) enum RunState {

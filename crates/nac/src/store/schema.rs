@@ -5,11 +5,14 @@ pub fn default_store_path() -> PathBuf {
 }
 
 pub fn initialize(path: &Path) -> Result<()> {
+    tracing::debug!(db_path = %path.display(), "initializing store schema");
     let _ = open_connection(path)?;
+    tracing::info!(db_path = %path.display(), "store schema initialized");
     Ok(())
 }
 
 pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
+    tracing::trace!(db_path = %path.display(), "opening SQLite store connection");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create store dir {}", parent.display()))?;
@@ -101,6 +104,7 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
         "INTEGER",
     )?;
     ensure_column(&conn, "sessions", "response_durations_ms_json", "TEXT")?;
+    tracing::trace!(db_path = %path.display(), "SQLite store connection ready");
     Ok(conn)
 }
 

@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 pub mod agent;
 pub mod agents_md;
@@ -20,3 +21,9 @@ pub mod tui;
 pub mod types;
 
 pub static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn test_env_lock() -> MutexGuard<'static, ()> {
+    TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}

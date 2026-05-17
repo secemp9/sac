@@ -53,8 +53,8 @@ pub struct SessionSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env_lock;
     use crate::types::Message;
-    use crate::TEST_ENV_LOCK;
 
     fn temp_store_path(label: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn create_and_load_session_round_trip() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let store_path = temp_store_path("round_trip");
 
         let mut snapshot = new_snapshot(
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn load_session_migrates_legacy_schema_without_duration_history() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let store_path = temp_store_path("legacy_duration_schema");
         std::fs::create_dir_all(store_path.parent().unwrap()).unwrap();
         let messages_json = serde_json::to_string(&vec![Message::User {
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn load_last_session_returns_most_recent() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let store_path = temp_store_path("latest");
 
         let first = new_snapshot(
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn list_sessions_returns_summaries_in_updated_order() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let store_path = temp_store_path("list");
 
         let first = new_snapshot(

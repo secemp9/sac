@@ -5,6 +5,15 @@ pub fn create_session(snapshot: &SessionSnapshot) -> Result<()> {
 }
 
 pub fn create_session_at(path: &Path, snapshot: &SessionSnapshot) -> Result<()> {
+    tracing::debug!(
+        session_id = %snapshot.session_id,
+        db_path = %path.display(),
+        cwd = %snapshot.cwd.display(),
+        model = %snapshot.model,
+        backend = ?snapshot.backend,
+        message_count = snapshot.messages.len(),
+        "creating session snapshot"
+    );
     let mut conn = crate::store::open_connection(path)?;
     let tx = conn.transaction()?;
 
@@ -25,6 +34,7 @@ pub fn create_session_at(path: &Path, snapshot: &SessionSnapshot) -> Result<()> 
 
     insert_or_replace_session(&tx, snapshot)?;
     tx.commit()?;
+    tracing::info!(session_id = %snapshot.session_id, db_path = %path.display(), "session snapshot created");
     Ok(())
 }
 
@@ -33,14 +43,25 @@ pub fn save_session(snapshot: &SessionSnapshot) -> Result<()> {
 }
 
 pub fn save_session_at(path: &Path, snapshot: &SessionSnapshot) -> Result<()> {
+    tracing::debug!(
+        session_id = %snapshot.session_id,
+        db_path = %path.display(),
+        cwd = %snapshot.cwd.display(),
+        model = %snapshot.model,
+        backend = ?snapshot.backend,
+        message_count = snapshot.messages.len(),
+        "saving session snapshot"
+    );
     let mut conn = crate::store::open_connection(path)?;
     let tx = conn.transaction()?;
     insert_or_replace_session(&tx, snapshot)?;
     tx.commit()?;
+    tracing::info!(session_id = %snapshot.session_id, db_path = %path.display(), "session snapshot saved");
     Ok(())
 }
 
 pub fn load_session(path: &Path, session_id: &str) -> Result<SessionSnapshot> {
+    tracing::debug!(session_id = %session_id, db_path = %path.display(), "loading session snapshot");
     let conn = crate::store::open_connection(path)?;
     let row = conn
         .query_row(
@@ -73,10 +94,21 @@ pub fn load_session(path: &Path, session_id: &str) -> Result<SessionSnapshot> {
         return Err(anyhow!("session '{}' was not found", session_id));
     };
 
-    row.into_snapshot()
+    let snapshot = row.into_snapshot()?;
+    tracing::info!(
+        session_id = %snapshot.session_id,
+        db_path = %path.display(),
+        cwd = %snapshot.cwd.display(),
+        model = %snapshot.model,
+        backend = ?snapshot.backend,
+        message_count = snapshot.messages.len(),
+        "loaded session snapshot"
+    );
+    Ok(snapshot)
 }
 
 pub fn load_last_session(path: &Path) -> Result<SessionSnapshot> {
+    tracing::debug!(db_path = %path.display(), "loading last session snapshot");
     let conn = crate::store::open_connection(path)?;
     let row = conn
         .query_row(
@@ -110,10 +142,21 @@ pub fn load_last_session(path: &Path) -> Result<SessionSnapshot> {
         return Err(anyhow!("no resumable nac sessions were found"));
     };
 
-    row.into_snapshot()
+    let snapshot = row.into_snapshot()?;
+    tracing::info!(
+        session_id = %snapshot.session_id,
+        db_path = %path.display(),
+        cwd = %snapshot.cwd.display(),
+        model = %snapshot.model,
+        backend = ?snapshot.backend,
+        message_count = snapshot.messages.len(),
+        "loaded last session snapshot"
+    );
+    Ok(snapshot)
 }
 
 pub fn list_sessions(path: &Path) -> Result<Vec<SessionSummary>> {
+    tracing::debug!(db_path = %path.display(), "listing resumable sessions");
     let conn = crate::store::open_connection(path)?;
     let mut stmt = conn.prepare(
         "SELECT session_id, cwd, model, base_url, backend, sandbox_json, messages_json, created_at, updated_at
@@ -163,6 +206,7 @@ pub fn list_sessions(path: &Path) -> Result<Vec<SessionSummary>> {
         });
     }
 
+    tracing::info!(db_path = %path.display(), session_count = sessions.len(), "listed resumable sessions");
     Ok(sessions)
 }
 

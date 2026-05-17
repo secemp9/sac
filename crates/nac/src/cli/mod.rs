@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentConfig, AgentMode};
@@ -37,6 +38,26 @@ use managed_worker::*;
 use resume::*;
 use sandbox::*;
 use upgrade::*;
+
+fn resolve_worker_executable_path() -> Result<PathBuf> {
+    let executable =
+        std::env::current_exe().context("failed to determine current nac executable path")?;
+    let canonical = std::fs::canonicalize(&executable).with_context(|| {
+        format!(
+            "failed to canonicalize worker executable {}",
+            executable.display()
+        )
+    })?;
+    let metadata = std::fs::metadata(&canonical)
+        .with_context(|| format!("failed to stat worker executable {}", canonical.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "worker executable path is not a file: {}",
+            canonical.display()
+        );
+    }
+    Ok(canonical)
+}
 
 pub async fn run() -> Result<()> {
     let cli = parse_cli();
@@ -93,7 +114,18 @@ pub async fn run() -> Result<()> {
     loop {
         match run_state {
             RunState::ManagedWorker(run_config) => {
-                run_managed_worker(run_config).await?;
+                let span = tracing::info_span!(
+                    "nac_run",
+                    role = "worker",
+                    pid = std::process::id(),
+                    log_path = ?crate::logging::current_log_path(),
+                    session_id = %run_config.session_id,
+                    thread_name = %run_config.thread_name,
+                    cwd = %run_config.working_directory,
+                    store_path = %run_config.store_path.display(),
+                    sandbox_state = %run_config.sandbox_status,
+                );
+                run_managed_worker(run_config).instrument(span).await?;
                 return Ok(());
             }
             RunState::Orchestrator {
@@ -103,12 +135,24 @@ pub async fn run() -> Result<()> {
             } => {
                 let store_path = run_config.session.store_path();
                 let session_id = run_config.session.session_id().map(str::to_string);
+                let workspace_display = run_config.workspace_display.clone();
+                let sandbox_status = run_config.sandbox_status.clone();
                 let restored_messages = run_config.agent.messages.clone();
                 let session_snapshot = run_config.session.into_snapshot();
                 let agent = run_config.agent;
                 let client = run_config.client;
+                let orchestrator_span = tracing::info_span!(
+                    "nac_run",
+                    role = "orchestrator",
+                    pid = std::process::id(),
+                    log_path = ?crate::logging::current_log_path(),
+                    session_id = ?session_id,
+                    cwd = %workspace_display,
+                    store_path = %store_path.display(),
+                    sandbox_state = %sandbox_status,
+                );
                 let metadata = TuiMetadata {
-                    cwd: run_config.workspace_display,
+                    cwd: workspace_display,
                     workspace_host_path: run_config.workspace_host_path,
                     store_path: store_path.clone(),
                     model: client.model.clone(),
@@ -137,6 +181,7 @@ pub async fn run() -> Result<()> {
                     start_in_session_picker,
                     ui_mode,
                 )
+                .instrument(orchestrator_span)
                 .await?
                 {
                     TuiOutcome::Exit => return Ok(()),
@@ -206,6 +251,76 @@ fn run_config_cli(cli: ConfigCli) -> Result<()> {
             let path = crate::logging::current_log_path()
                 .ok_or_else(|| anyhow::anyhow!("unable to resolve nac log path"))?;
             println!("{}", path.display());
+            Ok(())
+        }
+        ConfigCommand::Logs => {
+            let logs = crate::logging::list_log_files()?;
+            if logs.is_empty() {
+                println!("# No nac log files found");
+            } else {
+                for path in logs {
+                    println!("{}", path.display());
+                }
+            }
+            Ok(())
+        }
+        ConfigCommand::TailLog => {
+            let lines = crate::logging::tail_current_log_lines(40)?;
+            if lines.is_empty() {
+                println!("# Current log file is empty or missing");
+            } else {
+                for line in lines {
+                    println!("{}", line);
+                }
+            }
+            Ok(())
+        }
+        ConfigCommand::Doctor => {
+            let cwd = std::env::current_dir()?;
+            let loaded_config = NacConfig::load()?;
+            let config_path = config_path();
+            let log_path = crate::logging::current_log_path();
+            let log_count = crate::logging::log_file_count()?;
+            let tail = crate::logging::tail_current_log_lines(10)?;
+            let store_path = absolute_store_path(
+                &cwd,
+                loaded_config
+                    .storage
+                    .store_path
+                    .clone()
+                    .unwrap_or_else(store::default_store_path),
+            );
+            let sessions = sessions::list_sessions(&store_path).unwrap_or_default();
+
+            println!("# nac doctor");
+            println!();
+            println!("cwd: {}", cwd.display());
+            println!(
+                "config_path: {}",
+                config_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unavailable>".to_string())
+            );
+            println!("store_path: {}", store_path.display());
+            println!(
+                "log_path: {}",
+                log_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<unavailable>".to_string())
+            );
+            println!("log_file_count: {}", log_count);
+            println!("session_count: {}", sessions.len());
+            println!();
+            println!("## Recent log lines");
+            if tail.is_empty() {
+                println!("<none>");
+            } else {
+                for line in tail {
+                    println!("{}", line);
+                }
+            }
             Ok(())
         }
         ConfigCommand::Show => {
@@ -439,12 +554,25 @@ async fn build_run_cli_config(cli: RunCli, config: &NacConfig) -> Result<Orchest
     );
     store::initialize(&store_path)?;
     let session_id = Uuid::new_v4().to_string();
+    let worker_executable = resolve_worker_executable_path()?;
+    tracing::info!(
+        session_id = %session_id,
+        cwd = %current_dir.display(),
+        backend = ?client.backend(),
+        model = %client.model,
+        base_url = %client.base_url(),
+        worker_executable = %worker_executable.display(),
+        sandbox_status = %sandbox_status,
+        agents_md_status = %agents_md_status,
+        "fresh orchestrator config ready"
+    );
     let agent = Agent::with_config(
         client.clone(),
         AgentConfig {
             mode: AgentMode::Orchestrator,
             store_path: store_path.clone(),
             session_id: Some(session_id.clone()),
+            worker_executable: Some(worker_executable),
             initial_messages: Vec::new(),
             thread_name: None,
             event_sink: EventSink::none(),
@@ -499,6 +627,10 @@ async fn build_managed_worker_config(
         .as_ref()
         .map(|session| session.workdir_display())
         .unwrap_or_else(current_directory_display);
+    let sandbox_status = sandbox
+        .as_ref()
+        .map(|session| session.status_text())
+        .unwrap_or_else(|| "off".to_string());
     let agents_md_message = agents_md.system_message();
     let store_path = absolute_store_path(
         &current_dir,
@@ -527,13 +659,14 @@ async fn build_managed_worker_config(
             mode: AgentMode::Worker,
             store_path: store_path.clone(),
             session_id: Some(cli.dispatch.session_id.clone()),
+            worker_executable: None,
             initial_messages: build_worker_context_messages(
                 &cli.dispatch.thread_name,
                 &worker_context,
             ),
             thread_name: Some(cli.dispatch.thread_name.clone()),
-            event_sink: EventSink::stderr_prefixed(),
-            working_directory,
+            event_sink: EventSink::worker_stderr(),
+            working_directory: working_directory.clone(),
             sandbox,
             mcp,
             skills,
@@ -549,6 +682,8 @@ async fn build_managed_worker_config(
         session_id: cli.dispatch.session_id,
         thread_name: cli.dispatch.thread_name,
         action: cli.dispatch.action,
+        working_directory,
+        sandbox_status,
     })
 }
 
@@ -589,7 +724,7 @@ fn absolute_store_path(cwd: &Path, store_path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_ENV_LOCK;
+    use crate::test_env_lock;
 
     fn temp_store_path(label: &str) -> PathBuf {
         let unique = std::time::SystemTime::now()
@@ -671,7 +806,7 @@ mod tests {
 
     #[test]
     fn model_overrides_prefer_cli_then_config_then_env() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let original_base_url = std::env::var_os("OPENAI_BASE_URL");
         let original_model = std::env::var_os("OPENAI_MODEL");
         unsafe {
@@ -770,7 +905,7 @@ mod tests {
 
     #[test]
     fn nac_config_loads_new_sections_alongside_existing_mcp() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let original_nac_home = std::env::var_os("NAC_HOME");
         let root = std::env::temp_dir().join(format!(
             "nac_config_load_{}",
@@ -839,7 +974,7 @@ url = "https://mcp.context7.com/mcp"
 
     #[test]
     fn nac_config_loads_model_api_key() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let original_nac_home = std::env::var_os("NAC_HOME");
         let root = std::env::temp_dir().join(format!(
             "nac_config_api_key_{}",
@@ -1086,6 +1221,42 @@ url = "https://mcp.context7.com/mcp"
             }
             _ => panic!("expected config cli"),
         }
+
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("config"),
+            OsString::from("logs"),
+        ]);
+        match parsed {
+            ParsedCli::Config(cli) => {
+                assert!(matches!(cli.command, Some(ConfigCommand::Logs)));
+            }
+            _ => panic!("expected config cli"),
+        }
+
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("config"),
+            OsString::from("tail-log"),
+        ]);
+        match parsed {
+            ParsedCli::Config(cli) => {
+                assert!(matches!(cli.command, Some(ConfigCommand::TailLog)));
+            }
+            _ => panic!("expected config cli"),
+        }
+
+        let parsed = parse_cli_from(vec![
+            OsString::from("nac"),
+            OsString::from("config"),
+            OsString::from("doctor"),
+        ]);
+        match parsed {
+            ParsedCli::Config(cli) => {
+                assert!(matches!(cli.command, Some(ConfigCommand::Doctor)));
+            }
+            _ => panic!("expected config cli"),
+        }
     }
 
     #[test]
@@ -1110,7 +1281,7 @@ url = "https://mcp.context7.com/mcp"
 
     #[test]
     fn run_config_cli_init_show_and_reload_round_trip() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let original_nac_home = std::env::var_os("NAC_HOME");
         let root = std::env::temp_dir().join(format!(
             "nac_config_cli_roundtrip_{}",
@@ -1149,7 +1320,7 @@ url = "https://mcp.context7.com/mcp"
 
     #[test]
     fn current_log_path_uses_nac_home_layout() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let original_nac_home = std::env::var_os("NAC_HOME");
         let root = std::env::temp_dir().join(format!(
             "nac_log_path_cli_{}",
@@ -1206,7 +1377,7 @@ url = "https://mcp.context7.com/mcp"
 
     #[tokio::test]
     async fn managed_worker_builds_user_messages_from_self_and_source_threads() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
 
         let original_api_key = std::env::var("OPENAI_API_KEY").ok();
         unsafe {
@@ -1315,7 +1486,7 @@ url = "https://mcp.context7.com/mcp"
 
     #[tokio::test]
     async fn resume_config_restores_messages_and_cwd() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
 
         let original_api_key = std::env::var("OPENAI_API_KEY").ok();
         let original_cwd = std::env::current_dir().unwrap();
@@ -1413,7 +1584,7 @@ url = "https://mcp.context7.com/mcp"
 
     #[tokio::test]
     async fn resume_picker_uses_explicit_backend_override() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
 
         let original_api_key = std::env::var_os("OPENAI_API_KEY");
         let original_base_url = std::env::var_os("OPENAI_BASE_URL");

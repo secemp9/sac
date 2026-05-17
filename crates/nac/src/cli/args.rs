@@ -178,6 +178,12 @@ pub(super) enum ConfigCommand {
     Path,
     /// Print the current process log file path
     LogPath,
+    /// List available nac log files
+    Logs,
+    /// Print the last lines from the current process log file
+    TailLog,
+    /// Print a diagnostics bundle for nac runtime state and logs
+    Doctor,
     /// Print the current config file contents
     Show,
     /// Reload and validate configuration for this invocation

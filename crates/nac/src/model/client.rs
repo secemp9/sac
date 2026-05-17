@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct ModelClient {
@@ -41,6 +42,19 @@ impl ModelClient {
                 .or_else(|| default_reasoning_effort(backend)),
         };
 
+        tracing::debug!(
+            requested_backend = ?requested_backend,
+            resolved_backend = ?backend,
+            backend_source = if matches!(requested_backend, BackendKind::Auto) {
+                "auto_detect"
+            } else {
+                "explicit"
+            },
+            model = %model,
+            reasoning_effort = ?reasoning_effort,
+            "resolved model client configuration"
+        );
+
         Ok(Self {
             client: Client::new(),
             base_url,
@@ -56,7 +70,19 @@ impl ModelClient {
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ModelTurnResponse> {
-        match self.backend {
+        let started = Instant::now();
+        let message_count = messages.len();
+        let tool_count = tools.len();
+        tracing::info!(
+            backend = ?self.backend,
+            model = %self.model,
+            reasoning_effort = ?self.reasoning_effort,
+            message_count,
+            tool_count,
+            "starting model turn"
+        );
+
+        let response = match self.backend {
             BackendKind::Auto => unreachable!("backend auto should be resolved at client creation"),
             BackendKind::DeepSeekChat => self.send_deepseek_chat(messages, tools).await,
             BackendKind::FireworksChat => self.send_fireworks_chat(messages, tools).await,
@@ -72,7 +98,24 @@ impl ModelClient {
                 )
                 .await
             }
-        }
+        }?;
+
+        tracing::info!(
+            backend = ?self.backend,
+            model = %self.model,
+            finish_reason = ?response.finish_reason,
+            has_text = response.assistant.content.is_some(),
+            tool_call_count = response
+                .assistant
+                .tool_calls
+                .as_ref()
+                .map(|calls| calls.len())
+                .unwrap_or(0),
+            latency_ms = started.elapsed().as_millis() as u64,
+            "model turn completed"
+        );
+
+        Ok(response)
     }
 
     pub async fn complete_text(
@@ -143,6 +186,12 @@ impl ModelClient {
             }
         }
 
+        tracing::debug!(
+            backend = ?self.backend,
+            endpoint = "chat_completions",
+            request_bytes = json_value_len_bytes(&request)?,
+            "built fireworks chat request"
+        );
         let value = self.post_json_with_retry(&url, &request).await?;
         parse_chat_completions_response(&value, &url)
     }
@@ -155,6 +204,12 @@ impl ModelClient {
         let url = format!("{}/chat/completions", self.base_url);
         let request = deepseek_chat_request(&self.model, &messages, &tools);
 
+        tracing::debug!(
+            backend = ?self.backend,
+            endpoint = "chat_completions",
+            request_bytes = json_value_len_bytes(&request)?,
+            "built deepseek chat request"
+        );
         let value = self.post_json_with_retry(&url, &request).await?;
         parse_chat_completions_response(&value, &url)
     }
@@ -185,18 +240,41 @@ impl ModelClient {
             });
         }
 
+        tracing::debug!(
+            backend = ?self.backend,
+            endpoint = "responses",
+            request_bytes = json_value_len_bytes(&request)?,
+            "built openai responses request"
+        );
         let value = self.post_json_with_retry(&url, &request).await?;
         parse_openai_responses_response(&value, &url)
     }
 
     async fn post_json_with_retry(&self, url: &str, body: &Value) -> Result<Value> {
         let mut last_error = anyhow!("No attempts made");
+        let request_bytes = json_value_len_bytes(body)?;
 
         for attempt in 0..3 {
             if attempt > 0 {
                 let delay_secs = 1u64 << (attempt - 1);
+                tracing::warn!(
+                    backend = ?self.backend,
+                    endpoint = endpoint_name(url),
+                    attempt = attempt + 1,
+                    backoff_secs = delay_secs,
+                    "retrying model HTTP request after backoff"
+                );
                 sleep(Duration::from_secs(delay_secs)).await;
             }
+
+            let attempt_started = Instant::now();
+            tracing::debug!(
+                backend = ?self.backend,
+                endpoint = endpoint_name(url),
+                attempt = attempt + 1,
+                request_bytes,
+                "starting model HTTP attempt"
+            );
 
             let response = self
                 .client
@@ -213,9 +291,29 @@ impl ModelClient {
                 .text()
                 .await
                 .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
+            let response_bytes = body.len();
 
             if status.is_success() {
+                tracing::info!(
+                    backend = ?self.backend,
+                    endpoint = endpoint_name(url),
+                    attempt = attempt + 1,
+                    status = status.as_u16(),
+                    request_bytes,
+                    response_bytes,
+                    latency_ms = attempt_started.elapsed().as_millis() as u64,
+                    "model HTTP attempt succeeded"
+                );
                 return serde_json::from_str::<Value>(&body).map_err(|e| {
+                    tracing::error!(
+                        backend = ?self.backend,
+                        endpoint = endpoint_name(url),
+                        attempt = attempt + 1,
+                        status = status.as_u16(),
+                        response_bytes,
+                        parse_error = %e,
+                        "model HTTP success body failed JSON parse"
+                    );
                     anyhow!(
                         "Failed to parse response from {}: {}\nBody: {}",
                         url,
@@ -226,6 +324,17 @@ impl ModelClient {
             }
 
             if status.as_u16() == 429 || status.is_server_error() {
+                tracing::warn!(
+                    backend = ?self.backend,
+                    endpoint = endpoint_name(url),
+                    attempt = attempt + 1,
+                    status = status.as_u16(),
+                    request_bytes,
+                    response_bytes,
+                    latency_ms = attempt_started.elapsed().as_millis() as u64,
+                    retryable = true,
+                    "model HTTP attempt failed with retryable status"
+                );
                 last_error = anyhow!(
                     "HTTP {} from {}: {}",
                     status.as_u16(),
@@ -235,6 +344,17 @@ impl ModelClient {
                 continue;
             }
 
+            tracing::error!(
+                backend = ?self.backend,
+                endpoint = endpoint_name(url),
+                attempt = attempt + 1,
+                status = status.as_u16(),
+                request_bytes,
+                response_bytes,
+                latency_ms = attempt_started.elapsed().as_millis() as u64,
+                retryable = false,
+                "model HTTP attempt failed with non-retryable status"
+            );
             return Err(anyhow!(
                 "HTTP {} from {}: {}",
                 status.as_u16(),
@@ -244,6 +364,20 @@ impl ModelClient {
         }
 
         Err(last_error)
+    }
+}
+
+fn json_value_len_bytes(value: &Value) -> Result<usize> {
+    Ok(serde_json::to_vec(value)?.len())
+}
+
+fn endpoint_name(url: &str) -> &'static str {
+    if url.contains("/responses") {
+        "responses"
+    } else if url.contains("/chat/completions") {
+        "chat_completions"
+    } else {
+        "unknown"
     }
 }
 

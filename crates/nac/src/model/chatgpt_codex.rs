@@ -7,6 +7,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -136,16 +137,56 @@ pub async fn send_responses(
 ) -> Result<ModelTurnResponse> {
     let url = codex_responses_url(base_url);
     let request = codex_responses_request(model, reasoning_effort, &messages, &tools);
+    let started = Instant::now();
+    tracing::info!(
+        backend = ?BackendKind::ChatGptCodexResponses,
+        model = %model,
+        reasoning_effort = ?reasoning_effort,
+        message_count = messages.len(),
+        tool_count = tools.len(),
+        request_bytes = serde_json::to_vec(&request)?.len(),
+        "starting codex responses turn"
+    );
     let auth = fresh_auth(client).await?;
 
     match post_codex_json_with_retry(client, &url, &request, &auth).await {
-        Ok(value) => parse_openai_responses_response(&value, &url),
+        Ok(value) => {
+            let parsed = parse_openai_responses_response(&value, &url)?;
+            tracing::info!(
+                finish_reason = ?parsed.finish_reason,
+                has_text = parsed.assistant.content.is_some(),
+                tool_call_count = parsed
+                    .assistant
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| calls.len())
+                    .unwrap_or(0),
+                latency_ms = started.elapsed().as_millis() as u64,
+                "codex responses turn completed"
+            );
+            Ok(parsed)
+        }
         Err(error) if error.status == Some(StatusCode::UNAUTHORIZED) => {
+            tracing::warn!("codex responses request returned 401; forcing auth refresh");
             let refreshed = force_refresh_auth(client).await?;
             let value = post_codex_json_with_retry(client, &url, &request, &refreshed)
                 .await
                 .map_err(anyhow::Error::new)?;
-            parse_openai_responses_response(&value, &url)
+            let parsed = parse_openai_responses_response(&value, &url)?;
+            tracing::info!(
+                finish_reason = ?parsed.finish_reason,
+                has_text = parsed.assistant.content.is_some(),
+                tool_call_count = parsed
+                    .assistant
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| calls.len())
+                    .unwrap_or(0),
+                latency_ms = started.elapsed().as_millis() as u64,
+                refreshed_auth = true,
+                "codex responses turn completed after auth refresh"
+            );
+            Ok(parsed)
         }
         Err(error) => Err(anyhow::Error::new(error)),
     }
@@ -314,14 +355,27 @@ async fn fresh_auth(client: &Client) -> Result<StoredCodexAuth> {
     let _lock = acquire_auth_lock()?;
     let auth = read_auth_file()?;
     if auth.expires_at_ms > now_ms().saturating_add(REFRESH_SKEW_MS) {
+        tracing::debug!(
+            remaining_ms = auth.expires_at_ms.saturating_sub(now_ms()),
+            "reusing existing codex auth token"
+        );
         return Ok(auth);
     }
+    tracing::info!(
+        remaining_ms = auth.expires_at_ms.saturating_sub(now_ms()),
+        refresh_trigger = "expiry",
+        "refreshing codex auth because token is near expiry"
+    );
     refresh_and_store_auth(client, auth).await
 }
 
 async fn force_refresh_auth(client: &Client) -> Result<StoredCodexAuth> {
     let _lock = acquire_auth_lock()?;
     let auth = read_auth_file()?;
+    tracing::warn!(
+        refresh_trigger = "401",
+        "forcing codex auth refresh after unauthorized response"
+    );
     refresh_and_store_auth(client, auth).await
 }
 
@@ -329,9 +383,14 @@ async fn refresh_and_store_auth(
     client: &Client,
     current: StoredCodexAuth,
 ) -> Result<StoredCodexAuth> {
+    let started = Instant::now();
     let tokens = refresh_access_token(client, &current.refresh).await?;
     let refreshed = auth_from_token_response(tokens, Some(&current.account_id))?;
     write_auth_file(&refreshed)?;
+    tracing::info!(
+        latency_ms = started.elapsed().as_millis() as u64,
+        "codex auth refresh persisted"
+    );
     Ok(refreshed)
 }
 
@@ -431,12 +490,29 @@ async fn post_codex_json_with_retry(
         status: None,
         message: "No attempts made".to_string(),
     };
+    let request_bytes = serde_json::to_vec(body)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
 
     for attempt in 0..3 {
         if attempt > 0 {
             let delay_secs = 1u64 << (attempt - 1);
+            tracing::warn!(
+                attempt = attempt + 1,
+                backoff_secs = delay_secs,
+                endpoint = "responses",
+                "retrying codex HTTP request after backoff"
+            );
             sleep(Duration::from_secs(delay_secs)).await;
         }
+
+        let attempt_started = Instant::now();
+        tracing::debug!(
+            attempt = attempt + 1,
+            endpoint = "responses",
+            request_bytes,
+            "starting codex HTTP attempt"
+        );
 
         let response = client
             .post(url)
@@ -465,8 +541,10 @@ async fn post_codex_json_with_retry(
             status: Some(status),
             message: format!("Failed to read response body from {url}: {error}"),
         })?;
+        let response_bytes = response_body.len();
 
         if status.is_success() {
+            tracing::info!(attempt = attempt + 1, status = status.as_u16(), endpoint = "responses", request_bytes, response_bytes, latency_ms = attempt_started.elapsed().as_millis() as u64, content_type = ?content_type, "codex HTTP attempt succeeded");
             return parse_codex_success_body(url, status, content_type.as_deref(), &response_body);
         }
 
@@ -479,12 +557,42 @@ async fn post_codex_json_with_retry(
             ),
         };
         if status == StatusCode::UNAUTHORIZED {
+            tracing::warn!(
+                attempt = attempt + 1,
+                status = status.as_u16(),
+                request_bytes,
+                response_bytes,
+                latency_ms = attempt_started.elapsed().as_millis() as u64,
+                endpoint = "responses",
+                retryable = false,
+                "codex HTTP attempt failed with unauthorized status"
+            );
             return Err(error);
         }
         if status.as_u16() == 429 || status.is_server_error() {
+            tracing::warn!(
+                attempt = attempt + 1,
+                status = status.as_u16(),
+                request_bytes,
+                response_bytes,
+                latency_ms = attempt_started.elapsed().as_millis() as u64,
+                endpoint = "responses",
+                retryable = true,
+                "codex HTTP attempt failed with retryable status"
+            );
             last_error = error;
             continue;
         }
+        tracing::error!(
+            attempt = attempt + 1,
+            status = status.as_u16(),
+            request_bytes,
+            response_bytes,
+            latency_ms = attempt_started.elapsed().as_millis() as u64,
+            endpoint = "responses",
+            retryable = false,
+            "codex HTTP attempt failed with non-retryable status"
+        );
         return Err(error);
     }
 
@@ -497,11 +605,12 @@ fn parse_codex_success_body(
     content_type: Option<&str>,
     response_body: &str,
 ) -> std::result::Result<Value, CodexRequestError> {
-    if content_type
+    let looks_like_sse = content_type
         .map(|value| value.contains("text/event-stream"))
         .unwrap_or(false)
-        || response_body.lines().any(|line| line.starts_with("data:"))
-    {
+        || response_body.lines().any(|line| line.starts_with("data:"));
+    tracing::debug!(status = status.as_u16(), response_bytes = response_body.len(), looks_like_sse, content_type = ?content_type, endpoint = "responses", "parsing codex success body");
+    if looks_like_sse {
         return parse_codex_sse_response(response_body).map_err(|message| CodexRequestError {
             status: Some(status),
             message: format!(
@@ -523,8 +632,12 @@ fn parse_codex_success_body(
 fn parse_codex_sse_response(response_body: &str) -> std::result::Result<Value, String> {
     let mut final_response = None;
     let mut output_items: Vec<(usize, Value)> = Vec::new();
+    let started = Instant::now();
+    let payloads = sse_data_payloads(response_body);
+    let payload_count = payloads.len();
+    let mut terminal_event: Option<String> = None;
 
-    for data in sse_data_payloads(response_body) {
+    for data in payloads {
         if data == "[DONE]" {
             continue;
         }
@@ -548,6 +661,10 @@ fn parse_codex_sse_response(response_body: &str) -> std::result::Result<Value, S
                 }
             }
             Some("response.completed") | Some("response.done") | Some("response.incomplete") => {
+                terminal_event = event
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 if let Some(response) = event.get("response").and_then(Value::as_object) {
                     if response.get("status").and_then(Value::as_str) == Some("failed") {
                         return Err(codex_event_error_message(&event)
@@ -569,6 +686,15 @@ fn parse_codex_sse_response(response_body: &str) -> std::result::Result<Value, S
             _ => {}
         }
     }
+
+    tracing::info!(
+        payload_count,
+        output_item_done_count = output_items.len(),
+        terminal_event = ?terminal_event,
+        response_bytes = response_body.len(),
+        latency_ms = started.elapsed().as_millis() as u64,
+        "parsed codex SSE response"
+    );
 
     final_response.ok_or_else(|| "SSE stream did not include a final response event".to_string())
 }

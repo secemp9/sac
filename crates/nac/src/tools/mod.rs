@@ -29,6 +29,7 @@ pub struct ToolResult {
 pub struct ToolRuntime {
     pub store_path: PathBuf,
     pub session_id: Option<String>,
+    pub worker_executable: Option<PathBuf>,
     pub active_threads: Arc<Mutex<HashSet<String>>>,
     pub event_sink: EventSink,
     pub sandbox: Option<SandboxSession>,

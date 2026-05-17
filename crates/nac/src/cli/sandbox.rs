@@ -1,4 +1,5 @@
 use super::*;
+use tracing::Instrument;
 
 pub(super) trait SandboxCliArgs {
     fn sandbox_enabled(&self) -> bool;
@@ -117,7 +118,13 @@ pub(super) async fn build_sandbox_session<Cli: SandboxCliArgs>(
         .sandbox_session_key()
         .cloned()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let session = SandboxSession::create(spec, session_key, owner).await?;
+    let session = SandboxSession::create(spec, session_key.clone(), owner)
+        .instrument(tracing::info_span!(
+            "sandbox_create",
+            session_key = %session_key,
+            owner,
+        ))
+        .await?;
     Ok(Some(session))
 }
 

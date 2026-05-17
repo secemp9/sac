@@ -57,7 +57,7 @@ pub struct SkillCatalogEntry {
 mod tests {
     use super::*;
     use crate::sandbox::{SandboxSpec, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_WORKDIR};
-    use crate::TEST_ENV_LOCK;
+    use crate::test_env_lock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn project_sources_override_user_sources() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let root = temp_dir("precedence");
         let repo = root.join("repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn missing_description_skips_skill() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let root = temp_dir("missing_desc");
         let skill_root = root.join("repo/.agents/skills/foo");
         let nac_home = root.join("home/.config/nac");
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn auto_mounts_skip_paths_already_covered_by_workspace_mount() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let root = temp_dir("auto_mounts_covered");
         let repo = root.join("repo");
         let nac_home = root.join("home/.config/nac");

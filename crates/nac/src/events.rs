@@ -93,6 +93,10 @@ impl EventSink {
         }
     }
 
+    pub fn worker_stderr() -> Self {
+        Self::stderr_prefixed()
+    }
+
     pub fn emit(&self, event: AgentEvent) {
         if self.stderr_prefixed {
             if let Ok(encoded) = serde_json::to_string(&event) {
@@ -103,6 +107,12 @@ impl EventSink {
         if let Some(channel) = &self.channel {
             let _ = channel.send(event);
         }
+    }
+}
+
+pub fn emit_worker_stderr_event(event: &AgentEvent) {
+    if let Ok(encoded) = serde_json::to_string(event) {
+        eprintln!("{}{}", STDERR_EVENT_PREFIX, encoded);
     }
 }
 
@@ -133,8 +143,33 @@ mod tests {
     }
 
     #[test]
+    fn decode_prefixed_thread_spawned_round_trip() {
+        let event = AgentEvent::ThreadSpawned {
+            name: "impl".to_string(),
+            executable: "/home/secemp9/.local/bin/nac".to_string(),
+            cwd: "/workspace/project".to_string(),
+            sandboxed: false,
+        };
+        let encoded = format!(
+            "{}{}",
+            STDERR_EVENT_PREFIX,
+            serde_json::to_string(&event).unwrap()
+        );
+
+        let decoded = decode_stderr_event(&encoded).unwrap();
+        assert_eq!(decoded, event);
+    }
+
+    #[test]
     fn decode_prefixed_event_ignores_plain_lines() {
         assert!(decode_stderr_event("plain stderr line").is_none());
         assert!(decode_stderr_event("2026-01-01T00:00:00Z DEBUG nac::cli log line").is_none());
+    }
+
+    #[test]
+    fn worker_stderr_sink_is_prefixed() {
+        let sink = EventSink::worker_stderr();
+        assert!(sink.stderr_prefixed);
+        assert!(sink.channel.is_none());
     }
 }

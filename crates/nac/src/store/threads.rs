@@ -7,6 +7,14 @@ pub fn append_episode(
     action: &str,
     content: &str,
 ) -> Result<()> {
+    tracing::debug!(
+        db_path = %path.display(),
+        session_id = %session_id,
+        thread_name = %thread_name,
+        action_len = action.len(),
+        content_len = content.len(),
+        "appending retained episode"
+    );
     let mut conn = open_connection(path)?;
     let tx = conn.transaction()?;
     ensure_thread_in_tx(&tx, session_id, thread_name)?;
@@ -25,6 +33,7 @@ pub fn append_episode(
     )?;
 
     tx.commit()?;
+    tracing::info!(db_path = %path.display(), session_id = %session_id, thread_name = %thread_name, "retained episode appended");
     Ok(())
 }
 
@@ -34,6 +43,13 @@ pub fn load_worker_context(
     thread_name: &str,
     source_threads: &[String],
 ) -> Result<WorkerContext> {
+    tracing::debug!(
+        db_path = %path.display(),
+        session_id = %session_id,
+        thread_name = %thread_name,
+        source_threads = ?source_threads,
+        "loading worker context"
+    );
     let conn = open_connection(path)?;
     let self_episodes = load_thread_episodes(&conn, session_id, thread_name)?;
     let mut source_episodes = Vec::with_capacity(source_threads.len());
@@ -44,10 +60,19 @@ pub fn load_worker_context(
         source_episodes.push(episode);
     }
 
-    Ok(WorkerContext {
+    let context = WorkerContext {
         self_episodes,
         source_episodes,
-    })
+    };
+    tracing::info!(
+        db_path = %path.display(),
+        session_id = %session_id,
+        thread_name = %thread_name,
+        self_episode_count = context.self_episodes.len(),
+        source_episode_count = context.source_episodes.len(),
+        "worker context loaded"
+    );
+    Ok(context)
 }
 
 /// Load all episodes for all threads in one query, grouped by thread_name.
@@ -56,6 +81,7 @@ pub fn load_all_episodes(
     store_path: &Path,
     session_id: &str,
 ) -> Result<HashMap<String, Vec<EpisodeRecord>>> {
+    tracing::debug!(db_path = %store_path.display(), session_id = %session_id, "loading all retained episodes");
     let conn = open_connection(store_path)?;
     let mut stmt = conn.prepare(
         "SELECT e.id, e.thread_name, e.session_id, e.action, e.content, e.created_at
@@ -74,10 +100,12 @@ pub fn load_all_episodes(
             .or_default()
             .push(episode);
     }
+    tracing::info!(db_path = %store_path.display(), session_id = %session_id, thread_count = grouped.len(), "loaded all retained episodes");
     Ok(grouped)
 }
 
 pub fn list_threads(path: &Path, session_id: &str) -> Result<Vec<ThreadRecord>> {
+    tracing::debug!(db_path = %path.display(), session_id = %session_id, "listing retained threads");
     let conn = open_connection(path)?;
     let mut stmt = conn.prepare(
         "SELECT t.name, t.session_id, t.created_at, t.updated_at,
@@ -104,15 +132,20 @@ pub fn list_threads(path: &Path, session_id: &str) -> Result<Vec<ThreadRecord>> 
             latest_action: row.get(5)?,
         });
     }
+    tracing::info!(db_path = %path.display(), session_id = %session_id, thread_count = threads.len(), "listed retained threads");
     Ok(threads)
 }
 
 pub fn thread_read(path: &Path, session_id: &str, thread_name: &str) -> Result<Vec<EpisodeRecord>> {
+    tracing::debug!(db_path = %path.display(), session_id = %session_id, thread_name = %thread_name, "reading retained thread episodes");
     let conn = open_connection(path)?;
-    load_thread_episodes(&conn, session_id, thread_name)
+    let episodes = load_thread_episodes(&conn, session_id, thread_name)?;
+    tracing::info!(db_path = %path.display(), session_id = %session_id, thread_name = %thread_name, episode_count = episodes.len(), "read retained thread episodes");
+    Ok(episodes)
 }
 
 pub fn delete_thread(path: &Path, session_id: &str, thread_name: &str) -> Result<bool> {
+    tracing::debug!(db_path = %path.display(), session_id = %session_id, thread_name = %thread_name, "deleting retained thread");
     let mut conn = open_connection(path)?;
     let tx = conn.transaction()?;
     tx.execute(
@@ -124,6 +157,7 @@ pub fn delete_thread(path: &Path, session_id: &str, thread_name: &str) -> Result
         params![thread_name, session_id],
     )?;
     tx.commit()?;
+    tracing::info!(db_path = %path.display(), session_id = %session_id, thread_name = %thread_name, deleted = deleted > 0, "retained thread deletion finished");
     Ok(deleted > 0)
 }
 

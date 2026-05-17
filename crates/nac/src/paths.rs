@@ -30,7 +30,7 @@ pub fn nac_log_path_for_pid(pid: u32) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_ENV_LOCK;
+    use crate::test_env_lock;
     use std::ffi::OsString;
 
     fn restore_env(name: &str, value: Option<OsString>) {
@@ -42,7 +42,7 @@ mod tests {
 
     #[test]
     fn log_path_uses_nac_home_layout() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let _guard = test_env_lock();
         let original_nac_home = std::env::var_os("NAC_HOME");
         let root = std::env::temp_dir().join(format!(
             "nac_logs_path_{}",

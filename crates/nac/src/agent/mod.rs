@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tracing::Instrument;
 
 use crate::events::{AgentEvent, EventSink};
 use crate::mcp::McpRegistry;
@@ -32,6 +33,7 @@ pub struct AgentConfig {
     pub mode: AgentMode,
     pub store_path: PathBuf,
     pub session_id: Option<String>,
+    pub worker_executable: Option<PathBuf>,
     pub initial_messages: Vec<Message>,
     pub thread_name: Option<String>,
     pub event_sink: EventSink,
@@ -217,6 +219,7 @@ impl Agent {
             tool_runtime: ToolRuntime {
                 store_path: config.store_path,
                 session_id: config.session_id,
+                worker_executable: config.worker_executable,
                 active_threads: Arc::new(Mutex::new(HashSet::new())),
                 event_sink: config.event_sink.clone(),
                 sandbox: config.sandbox,
@@ -238,6 +241,7 @@ impl Agent {
                 mode: AgentMode::Worker,
                 store_path: crate::store::default_store_path(),
                 session_id: None,
+                worker_executable: None,
                 initial_messages: Vec::new(),
                 thread_name: None,
                 event_sink: EventSink::none(),
@@ -255,29 +259,53 @@ impl Agent {
     }
 
     pub async fn send(&mut self, prompt: &str) -> Result<String> {
-        self.emit(AgentEvent::RunStarted {
-            thread_name: self.thread_name.clone(),
-            prompt_preview: preview(prompt, 160),
-        });
-        self.messages.push(Message::User {
-            content: prompt.to_string(),
-        });
-
-        let mut iteration = 0usize;
-        loop {
-            iteration = iteration.saturating_add(1);
-            self.emit(AgentEvent::ModelCallStarted {
+        let role = if self.thread_name.is_some() {
+            "worker"
+        } else {
+            "orchestrator"
+        };
+        let thread_name = self.thread_name.clone();
+        let session_id = self.tool_runtime.session_id.clone();
+        let store_path = self.tool_runtime.store_path.display().to_string();
+        let prompt_len = prompt.len();
+        let message_count_before = self.messages.len();
+        let tool_def_count = self.tool_defs.len();
+        async {
+            self.emit(AgentEvent::RunStarted {
                 thread_name: self.thread_name.clone(),
-                iteration,
+                prompt_preview: preview(prompt, 160),
+            });
+            self.messages.push(Message::User {
+                content: prompt.to_string(),
             });
 
-            let response = match self
-                .client
-                .send_turn(self.messages.clone(), self.tool_defs.clone())
-                .await
-            {
-                Ok(response) => response,
-                Err(error) => {
+            let mut iteration = 0usize;
+            loop {
+                iteration = iteration.saturating_add(1);
+                self.emit(AgentEvent::ModelCallStarted {
+                    thread_name: self.thread_name.clone(),
+                    iteration,
+                });
+
+                let response = match self
+                    .client
+                    .send_turn(self.messages.clone(), self.tool_defs.clone())
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        self.emit(AgentEvent::Error {
+                            thread_name: self.thread_name.clone(),
+                            message: error.to_string(),
+                        });
+                        self.tool_runtime.terminal_manager.remove_all().await;
+                        return Err(error);
+                    }
+                };
+                if response.finish_reason.as_deref() == Some("length") {
+                    let error = anyhow!(
+                        "Context window full (finish_reason=length). nac does not auto-compact thread history right now; retry with a narrower prompt, a fresh thread, or less carried context."
+                    );
                     self.emit(AgentEvent::Error {
                         thread_name: self.thread_name.clone(),
                         message: error.to_string(),
@@ -285,65 +313,65 @@ impl Agent {
                     self.tool_runtime.terminal_manager.remove_all().await;
                     return Err(error);
                 }
-            };
-            if response.finish_reason.as_deref() == Some("length") {
-                let error = anyhow!(
-                    "Context window full (finish_reason=length). nac does not auto-compact thread history right now; retry with a narrower prompt, a fresh thread, or less carried context."
-                );
-                self.emit(AgentEvent::Error {
-                    thread_name: self.thread_name.clone(),
-                    message: error.to_string(),
-                });
-                self.tool_runtime.terminal_manager.remove_all().await;
-                return Err(error);
-            }
 
-            let has_tool_calls = response
-                .assistant
-                .tool_calls
-                .as_ref()
-                .map(|tool_calls| !tool_calls.is_empty())
-                .unwrap_or(false);
-
-            self.messages.push(Message::Assistant {
-                content: response.assistant.content.clone(),
-                reasoning_text: response.assistant.reasoning_text.clone(),
-                reasoning_details: response.assistant.reasoning_details.clone(),
-                tool_calls: response.assistant.tool_calls.clone(),
-            });
-
-            if !has_tool_calls {
-                let content = response
+                let has_tool_calls = response
                     .assistant
-                    .content
-                    .unwrap_or_else(|| "[No response]".to_string());
-                self.emit(AgentEvent::AssistantMessage {
-                    thread_name: self.thread_name.clone(),
-                    content: content.clone(),
-                });
-                self.emit(AgentEvent::RunFinished {
-                    thread_name: self.thread_name.clone(),
-                });
-                self.tool_runtime.terminal_manager.remove_all().await;
-                return Ok(content);
-            }
+                    .tool_calls
+                    .as_ref()
+                    .map(|tool_calls| !tool_calls.is_empty())
+                    .unwrap_or(false);
 
-            let tool_calls = response.assistant.tool_calls.unwrap_or_default();
-            let results = execute_tools_parallel(
-                tool_calls,
-                self.tool_runtime.clone(),
-                self.client.clone(),
-                self.event_sink.clone(),
-                self.thread_name.clone(),
-            )
-            .await;
-            for (tool_call_id, _tool_name, result) in results {
-                self.messages.push(Message::Tool {
-                    tool_call_id,
-                    content: result.content,
+                self.messages.push(Message::Assistant {
+                    content: response.assistant.content.clone(),
+                    reasoning_text: response.assistant.reasoning_text.clone(),
+                    reasoning_details: response.assistant.reasoning_details.clone(),
+                    tool_calls: response.assistant.tool_calls.clone(),
                 });
+
+                if !has_tool_calls {
+                    let content = response
+                        .assistant
+                        .content
+                        .unwrap_or_else(|| "[No response]".to_string());
+                    self.emit(AgentEvent::AssistantMessage {
+                        thread_name: self.thread_name.clone(),
+                        content: content.clone(),
+                    });
+                    self.emit(AgentEvent::RunFinished {
+                        thread_name: self.thread_name.clone(),
+                    });
+                    self.tool_runtime.terminal_manager.remove_all().await;
+                    return Ok(content);
+                }
+
+                let tool_calls = response.assistant.tool_calls.unwrap_or_default();
+                let results = execute_tools_parallel(
+                    tool_calls,
+                    self.tool_runtime.clone(),
+                    self.client.clone(),
+                    self.event_sink.clone(),
+                    self.thread_name.clone(),
+                )
+                .await;
+                for (tool_call_id, _tool_name, result) in results {
+                    self.messages.push(Message::Tool {
+                        tool_call_id,
+                        content: result.content,
+                    });
+                }
             }
         }
+        .instrument(tracing::info_span!(
+            "agent_send",
+            role,
+            thread_name = ?thread_name,
+            session_id = ?session_id,
+            store_path = %store_path,
+            prompt_len,
+            message_count_before,
+            tool_def_count,
+        ))
+        .await
     }
 
     pub fn set_event_sink(&mut self, sink: EventSink) {
@@ -435,6 +463,7 @@ mod tests {
                 mode: AgentMode::Worker,
                 store_path: crate::store::default_store_path(),
                 session_id: None,
+                worker_executable: None,
                 initial_messages: Vec::new(),
                 thread_name: None,
                 event_sink: EventSink::none(),
@@ -462,6 +491,7 @@ mod tests {
                 mode: AgentMode::Orchestrator,
                 store_path: crate::store::default_store_path(),
                 session_id: None,
+                worker_executable: None,
                 initial_messages: Vec::new(),
                 thread_name: None,
                 event_sink: EventSink::none(),

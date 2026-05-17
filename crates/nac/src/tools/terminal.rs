@@ -368,6 +368,7 @@ mod tests {
         ToolRuntime {
             store_path: PathBuf::new(),
             session_id: None,
+            worker_executable: None,
             active_threads: Arc::new(Mutex::new(HashSet::new())),
             event_sink: EventSink::none(),
             sandbox: None,
