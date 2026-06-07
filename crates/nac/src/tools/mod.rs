@@ -66,7 +66,7 @@ pub fn worker_tool_definitions() -> Vec<ToolDefinition> {
         ),
         def(
             "write",
-            "Write content to a file. Creates parent directories automatically.",
+            "Create a new file or completely overwrite an existing file. Creates parent directories automatically.\n\nUse this tool to:\n- Create new files that don't exist yet\n- Completely replace a file's content when most of it changes\n\nPrefer the `edit` tool for partial modifications to existing files.",
             json!({
                 "type": "object",
                 "properties": {
@@ -78,13 +78,13 @@ pub fn worker_tool_definitions() -> Vec<ToolDefinition> {
         ),
         def(
             "edit",
-            "Replace exact text in a file.",
+            "Replace exact text in a file. This is your PRIMARY tool for modifying existing files.\n\nUsage:\n- old_text must be an EXACT substring match of the file's current content (whitespace-sensitive)\n- old_text must appear exactly ONCE in the file. If it appears multiple times, include more surrounding context lines to make it unique\n- Include complete lines in old_text, not partial lines\n- For multiple changes in one file, call edit multiple times\n\nPrefer this tool over exec_command with sed/python for all file modifications.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Path to file" },
-                    "old_text": { "type": "string", "description": "Text to find and replace" },
-                    "new_text": { "type": "string", "description": "Replacement text" }
+                    "old_text": { "type": "string", "description": "The exact text to find in the file. Must be unique — include enough surrounding lines for a unique match. Use complete lines, not fragments." },
+                    "new_text": { "type": "string", "description": "The replacement text. Can be empty to delete the matched text." }
                 },
                 "required": ["path", "old_text", "new_text"]
             }),

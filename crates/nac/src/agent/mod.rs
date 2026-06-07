@@ -94,6 +94,12 @@ impl Agent {
                      asks for them.\n\
                      Do not dump raw tool traces. Do not restate borrowed context unless it materially affected \
                      the outcome of this dispatch.\n\n\
+                     File operations:\n\
+                     - Use `read` to view file contents with line numbers\n\
+                     - Use `edit` to modify existing files (find-and-replace exact text). This is your primary editing tool.\n\
+                     - Use `write` to create new files or completely replace file content\n\
+                     - Do NOT use exec_command with python/sed/awk/cat for file editing. Always prefer the dedicated edit and write tools.\n\
+                     - Only use exec_command for running build commands, tests, git, and other non-file-editing tasks.\n\n\
                      You have access to a persistent terminal via exec_command and write_stdin.\n\
                      - Use exec_command with tty=false for quick commands, like a one-shot bash tool; yield_time_ms is the command timeout for this mode.\n\
                      - Use exec_command with tty=true to create a persistent shell session. You'll get a session_name back.\n\
