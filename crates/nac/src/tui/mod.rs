@@ -140,6 +140,18 @@ enum SlashCommand {
     Sessions,
     Plan { instruction: String },
     Run { workset_id: String },
+    Goal { subcommand: GoalSubcommand },
+    Custom { name: String, args: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GoalSubcommand {
+    Show,
+    Set { objective: String },
+    Clear,
+    Pause,
+    Resume,
+    Edit { objective: String },
 }
 
 #[derive(Debug)]
@@ -343,6 +355,35 @@ pub async fn run(
                             )
                             .await?;
                         }
+
+                        // Handle deferred goal pause/clear from user input
+                        // during the agent run (flags set via /goal pause,
+                        // /goal clear, or Escape key while agent was working).
+                        if app.goal_clear_requested {
+                            app.goal_clear_requested = false;
+                            app.goal_pause_requested = false;
+                            app.clear_goal();
+                        } else if app.goal_pause_requested {
+                            app.goal_pause_requested = false;
+                            app.pause_goal();
+                        }
+
+                        // Goal auto-continuation (skipped if goal was just
+                        // paused or cleared by the deferred flags above).
+                        if app.goal_should_continue() {
+                            app.increment_goal_turn();
+                            let continuation_prompt = app.build_goal_continuation_prompt();
+                            app.push_timeline(
+                                "goal",
+                                format!("auto-continuing (turn {})", app.goal.as_ref().map(|g| g.turns_completed).unwrap_or(0)),
+                                Tone::Info,
+                            );
+                            submit_prompt(continuation_prompt, agent.clone(), &mut app, &mut terminal)?;
+                        } else if app.goal.as_ref().is_some_and(|g| {
+                            g.status == crate::goal::GoalStatus::Active && g.turns_completed >= g.max_turns
+                        }) {
+                            app.goal_hit_turn_limit();
+                        }
                     }
                 }
                 _ = animation_tick.tick() => {
@@ -402,7 +443,11 @@ fn submit_prompt(
     app: &mut App,
     terminal: &mut UiTerminal,
 ) -> Result<()> {
-    let agent_prompt = expand_user_prompt(&prompt);
+    let agent_prompt = expand_user_prompt(
+        &prompt,
+        app.command_registry.as_deref(),
+        std::path::Path::new(&app.metadata.cwd),
+    );
     tracing::info!(
         prompt_len = prompt.len(),
         expanded_prompt_len = agent_prompt.len(),
@@ -657,7 +702,7 @@ mod tests {
             .composer_notice
             .as_ref()
             .expect("expected composer notice");
-        assert_eq!(notice.text, "unknown slash command: /bogus");
+        assert_eq!(notice.text, "unknown command: /bogus");
         assert_eq!(notice.tone, Tone::Warning);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -698,7 +743,7 @@ mod tests {
 
     #[test]
     fn plan_command_expands_to_workset_prompt() {
-        let expanded = expand_user_prompt("/plan refresh auth flow");
+        let expanded = expand_user_prompt("/plan refresh auth flow", None, Path::new("/tmp"));
 
         assert!(expanded.contains("# /plan: Workset Planning"));
         assert!(expanded.contains("workset_define"));
@@ -713,7 +758,7 @@ mod tests {
 
     #[test]
     fn run_command_expands_to_existing_workset_prompt() {
-        let expanded = expand_user_prompt("/run auth-refresh");
+        let expanded = expand_user_prompt("/run auth-refresh", None, Path::new("/tmp"));
 
         assert!(expanded.contains("# /run: Workset Execution"));
         assert!(expanded.contains("workset_read"));
@@ -2096,5 +2141,225 @@ mod tests {
         let widths: Vec<usize> = plain.iter().map(|line| display_width(line)).collect();
 
         assert!(widths.iter().all(|width| *width == widths[0]));
+    }
+
+    // ── Deferred goal pause/clear tests ───────────────────────────────
+
+    #[test]
+    fn goal_pause_while_agent_running_sets_deferred_flag() {
+        let dir = temp_dir("goal-pause-running");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.set_goal("build the feature".to_string());
+
+        // Simulate agent running
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        app.result_rx = Some(rx);
+        app.composer.insert_str("/goal pause");
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(action, AppAction::None));
+        assert!(app.goal_pause_requested);
+        // Goal should still be active (not yet paused)
+        assert_eq!(
+            app.goal.as_ref().unwrap().status,
+            crate::goal::GoalStatus::Active,
+        );
+        assert_eq!(app.prompt(), "");
+        let notice = app.composer_notice.as_ref().expect("expected notice");
+        assert!(notice.text.contains("pause after current turn"));
+        assert_eq!(notice.tone, Tone::Warning);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn goal_clear_while_agent_running_sets_deferred_flag() {
+        let dir = temp_dir("goal-clear-running");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.set_goal("build the feature".to_string());
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        app.result_rx = Some(rx);
+        app.composer.insert_str("/goal clear");
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(action, AppAction::None));
+        assert!(app.goal_clear_requested);
+        assert!(app.goal.is_some()); // not yet cleared
+        let notice = app.composer_notice.as_ref().expect("expected notice");
+        assert!(notice.text.contains("clear after current turn"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn goal_show_while_agent_running_displays_status() {
+        let dir = temp_dir("goal-show-running");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.set_goal("build the feature".to_string());
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        app.result_rx = Some(rx);
+        app.composer.insert_str("/goal");
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(action, AppAction::None));
+        assert!(!app.goal_pause_requested);
+        assert!(!app.goal_clear_requested);
+        let notice = app.composer_notice.as_ref().expect("expected notice");
+        assert!(notice.text.contains("build the feature"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn non_goal_command_blocked_while_agent_running() {
+        let dir = temp_dir("non-goal-blocked");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        app.result_rx = Some(rx);
+        app.composer.insert_str("some prompt text");
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(action, AppAction::None));
+        // Prompt should NOT have been cleared (still in composer)
+        assert_eq!(app.prompt(), "some prompt text");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn goal_set_blocked_while_agent_running() {
+        let dir = temp_dir("goal-set-blocked");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        app.result_rx = Some(rx);
+        app.composer.insert_str("/goal set new objective");
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        // /goal set should be blocked while running (not in the allow-list)
+        assert!(matches!(action, AppAction::None));
+        assert!(!app.goal_pause_requested);
+        assert!(!app.goal_clear_requested);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn escape_requests_goal_pause_while_agent_running() {
+        let dir = temp_dir("goal-esc-pause");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.set_goal("build the feature".to_string());
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        app.result_rx = Some(rx);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(action, AppAction::None));
+        assert!(app.goal_pause_requested);
+        let notice = app.composer_notice.as_ref().expect("expected notice");
+        assert!(notice.text.contains("pause after current turn"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn escape_does_not_pause_when_no_goal_active() {
+        let dir = temp_dir("goal-esc-no-goal");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        // No goal set, agent running
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        app.result_rx = Some(rx);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(action, AppAction::None));
+        assert!(!app.goal_pause_requested);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn escape_dismisses_focus_even_with_goal_active() {
+        let dir = temp_dir("goal-esc-focus");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.set_goal("build the feature".to_string());
+        app.screen = ScreenMode::Focused(FocusPanel::Response);
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        app.result_rx = Some(rx);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // Should dismiss focus, not request pause
+        assert!(matches!(action, AppAction::None));
+        assert!(!app.goal_pause_requested);
+        assert_eq!(app.screen, ScreenMode::Dashboard);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deferred_pause_flag_resets_after_check() {
+        let dir = temp_dir("goal-deferred-reset");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.set_goal("build the feature".to_string());
+        app.goal_pause_requested = true;
+
+        // Simulate what the result_rx handler does:
+        // check and clear the flags, then call pause_goal()
+        if app.goal_clear_requested {
+            app.goal_clear_requested = false;
+            app.goal_pause_requested = false;
+            app.clear_goal();
+        } else if app.goal_pause_requested {
+            app.goal_pause_requested = false;
+            app.pause_goal();
+        }
+
+        assert!(!app.goal_pause_requested);
+        assert_eq!(
+            app.goal.as_ref().unwrap().status,
+            crate::goal::GoalStatus::Paused
+        );
+        assert!(!app.goal_should_continue());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deferred_clear_takes_precedence_over_pause() {
+        let dir = temp_dir("goal-deferred-clear-precedence");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.set_goal("build the feature".to_string());
+        app.goal_pause_requested = true;
+        app.goal_clear_requested = true;
+
+        // Simulate what the result_rx handler does
+        if app.goal_clear_requested {
+            app.goal_clear_requested = false;
+            app.goal_pause_requested = false;
+            app.clear_goal();
+        } else if app.goal_pause_requested {
+            app.goal_pause_requested = false;
+            app.pause_goal();
+        }
+
+        assert!(!app.goal_pause_requested);
+        assert!(!app.goal_clear_requested);
+        assert!(app.goal.is_none());
+        assert!(!app.goal_should_continue());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn goal_should_not_continue_after_deferred_pause() {
+        let dir = temp_dir("goal-no-continue-after-pause");
+        let mut app = App::new(metadata_for(&dir), &[], false);
+        app.set_goal("build the feature".to_string());
+        assert!(app.goal_should_continue());
+
+        app.pause_goal();
+        assert!(!app.goal_should_continue());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -84,6 +84,15 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
              created_at TEXT NOT NULL,
              updated_at TEXT NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS goals (
+             session_id TEXT PRIMARY KEY,
+             objective TEXT NOT NULL,
+             status TEXT NOT NULL DEFAULT 'active',
+             turns_completed INTEGER NOT NULL DEFAULT 0,
+             max_turns INTEGER NOT NULL DEFAULT 10,
+             created_at TEXT NOT NULL,
+             updated_at TEXT NOT NULL
+         );
          CREATE INDEX IF NOT EXISTS idx_episodes_thread_session_created
              ON episodes(thread_name, session_id, id);
          CREATE INDEX IF NOT EXISTS idx_worksets_session_updated

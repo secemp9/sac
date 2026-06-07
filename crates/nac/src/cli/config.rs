@@ -37,6 +37,8 @@ pub(super) struct ModelConfig {
     pub(super) model: Option<String>,
     pub(super) base_url: Option<String>,
     pub(super) reasoning_effort: Option<ReasoningEffort>,
+    pub(super) reasoning_summary: Option<ReasoningSummary>,
+    pub(super) reasoning_context: Option<ReasoningContext>,
     pub(super) api_key_env: Option<String>,
     pub(super) api_key: Option<String>,
 }
@@ -90,6 +92,8 @@ pub(super) fn sample_config() -> String {
 # model = "gpt-5.5"
 # base_url = "https://api.openai.com/v1"
 # reasoning_effort = "xhigh"
+# reasoning_summary = "auto"
+# reasoning_context = "all_turns"
 # api_key_env = "OPENAI_API_KEY"
 # api_key = "paste-a-static-api-key-here-only-if-you-really-want-config-managed-secrets"
 
@@ -126,8 +130,14 @@ pub(super) fn config_presence_summary(config: &NacConfig) -> Vec<String> {
     if config.model.base_url.is_some() {
         entries.push("model.base_url".to_string());
     }
-    if let Some(effort) = config.model.reasoning_effort {
+    if let Some(effort) = &config.model.reasoning_effort {
         entries.push(format!("model.reasoning_effort={}", effort.as_str()));
+    }
+    if let Some(summary) = &config.model.reasoning_summary {
+        entries.push(format!("model.reasoning_summary={}", summary.as_str()));
+    }
+    if let Some(context) = &config.model.reasoning_context {
+        entries.push(format!("model.reasoning_context={}", context.as_str()));
     }
     if let Some(env_name) = config
         .model

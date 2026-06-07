@@ -131,12 +131,14 @@ pub async fn send_responses(
     client: &Client,
     base_url: &str,
     model: &str,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<&ReasoningEffort>,
+    reasoning_summary: Option<&ReasoningSummary>,
+    reasoning_context: Option<&ReasoningContext>,
     messages: Vec<Message>,
     tools: Vec<ToolDefinition>,
 ) -> Result<ModelTurnResponse> {
     let url = codex_responses_url(base_url);
-    let request = codex_responses_request(model, reasoning_effort, &messages, &tools);
+    let request = codex_responses_request(model, reasoning_effort, reasoning_summary, reasoning_context, &messages, &tools);
     let started = Instant::now();
     tracing::info!(
         backend = ?BackendKind::ChatGptCodexResponses,
@@ -417,7 +419,9 @@ fn auth_from_token_response(
 
 fn codex_responses_request(
     model: &str,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<&ReasoningEffort>,
+    reasoning_summary: Option<&ReasoningSummary>,
+    reasoning_context: Option<&ReasoningContext>,
     messages: &[Message],
     tools: &[ToolDefinition],
 ) -> Value {
@@ -448,9 +452,16 @@ fn codex_responses_request(
     }
 
     if let Some(effort) = reasoning_effort {
-        request["reasoning"] = json!({
+        let mut reasoning = json!({
             "effort": effort.as_str(),
         });
+        if let Some(summary) = reasoning_summary {
+            reasoning["summary"] = json!(summary.as_str());
+        }
+        if let Some(context) = reasoning_context {
+            reasoning["context"] = json!(context.as_str());
+        }
+        request["reasoning"] = reasoning;
         request["include"] = json!(["reasoning.encrypted_content"]);
     }
 
@@ -1029,7 +1040,9 @@ mod tests {
     fn builds_codex_responses_stream_request() {
         let request = codex_responses_request(
             "gpt-5.5",
-            Some(ReasoningEffort::High),
+            Some(&ReasoningEffort::High),
+            None,
+            None,
             &[
                 Message::System {
                     content: "system instructions".to_string(),

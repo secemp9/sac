@@ -29,9 +29,7 @@ impl BackendKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "lowercase")]
-#[value(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReasoningEffort {
     None,
     Minimal,
@@ -39,10 +37,12 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Xhigh,
+    /// A model-defined effort value that this client does not know yet.
+    Custom(String),
 }
 
 impl ReasoningEffort {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::None => "none",
             Self::Minimal => "minimal",
@@ -50,6 +50,76 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Custom(s) => s.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ReasoningEffort {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "" => Err("reasoning effort must not be empty".to_string()),
+            other => Ok(Self::Custom(other.to_string())),
+        }
+    }
+}
+
+impl serde::Serialize for ReasoningEffort {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningSummary {
+    Auto,
+    Concise,
+    Detailed,
+}
+
+impl ReasoningSummary {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Auto => "auto",
+            Self::Concise => "concise",
+            Self::Detailed => "detailed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningContext {
+    CurrentTurn,
+    AllTurns,
+}
+
+impl ReasoningContext {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::CurrentTurn => "current_turn",
+            Self::AllTurns => "all_turns",
         }
     }
 }
@@ -60,6 +130,8 @@ pub struct ClientOverrides {
     pub model: Option<String>,
     pub backend: Option<BackendKind>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_summary: Option<ReasoningSummary>,
+    pub reasoning_context: Option<ReasoningContext>,
     pub api_key_env: Option<String>,
     pub api_key: Option<String>,
 }

@@ -169,7 +169,9 @@ async fn build_resume_config_from_snapshot(
             .clone()
             .or_else(|| Some(snapshot.model.clone())),
         backend: model_args.backend.or(Some(snapshot.backend)),
-        reasoning_effort: model_args.reasoning_effort.or(snapshot.reasoning_effort),
+        reasoning_effort: model_args.reasoning_effort.clone().or_else(|| snapshot.reasoning_effort.clone()),
+        reasoning_summary: model_args.reasoning_summary.clone().or_else(|| config.model.reasoning_summary.clone()),
+        reasoning_context: model_args.reasoning_context.clone().or_else(|| config.model.reasoning_context.clone()),
         api_key_env: configured_api_key_env(config),
         api_key: config
             .model

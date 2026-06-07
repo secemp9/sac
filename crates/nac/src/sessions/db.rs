@@ -252,7 +252,7 @@ fn insert_or_replace_session(
             snapshot.model,
             snapshot.base_url,
             snapshot.backend.as_str(),
-            snapshot.reasoning_effort.map(|effort| effort.as_str().to_string()),
+            snapshot.reasoning_effort.as_ref().map(|effort| effort.as_str().to_string()),
             sandbox_json,
             messages_json,
             snapshot.last_response_duration_ms,
@@ -326,14 +326,11 @@ fn parse_backend(raw: Option<String>, base_url: &str) -> Result<BackendKind> {
 }
 
 fn parse_reasoning_effort(raw: Option<String>) -> Result<Option<ReasoningEffort>> {
-    match raw.as_deref() {
-        Some("none") => Ok(Some(ReasoningEffort::None)),
-        Some("minimal") => Ok(Some(ReasoningEffort::Minimal)),
-        Some("low") => Ok(Some(ReasoningEffort::Low)),
-        Some("medium") => Ok(Some(ReasoningEffort::Medium)),
-        Some("high") => Ok(Some(ReasoningEffort::High)),
-        Some("xhigh") => Ok(Some(ReasoningEffort::Xhigh)),
-        Some(other) => Err(anyhow!("unsupported stored reasoning effort '{}'", other)),
+    match raw {
+        Some(s) => {
+            let effort: ReasoningEffort = s.parse().map_err(|e: String| anyhow!(e))?;
+            Ok(Some(effort))
+        }
         None => Ok(None),
     }
 }

@@ -9,6 +9,8 @@ pub struct ModelClient {
     pub model: String,
     backend: BackendKind,
     reasoning_effort: Option<ReasoningEffort>,
+    reasoning_summary: Option<ReasoningSummary>,
+    reasoning_context: Option<ReasoningContext>,
 }
 
 impl ModelClient {
@@ -41,6 +43,14 @@ impl ModelClient {
                 .reasoning_effort
                 .or_else(|| default_reasoning_effort(backend)),
         };
+        let reasoning_summary = match backend {
+            BackendKind::DeepSeekChat | BackendKind::FireworksChat => None,
+            _ => overrides.reasoning_summary,
+        };
+        let reasoning_context = match backend {
+            BackendKind::DeepSeekChat | BackendKind::FireworksChat => None,
+            _ => overrides.reasoning_context,
+        };
 
         tracing::debug!(
             requested_backend = ?requested_backend,
@@ -52,6 +62,8 @@ impl ModelClient {
             },
             model = %model,
             reasoning_effort = ?reasoning_effort,
+            reasoning_summary = ?reasoning_summary,
+            reasoning_context = ?reasoning_context,
             "resolved model client configuration"
         );
 
@@ -62,6 +74,8 @@ impl ModelClient {
             model,
             backend,
             reasoning_effort,
+            reasoning_summary,
+            reasoning_context,
         })
     }
 
@@ -92,7 +106,9 @@ impl ModelClient {
                     &self.client,
                     &self.base_url,
                     &self.model,
-                    self.reasoning_effort,
+                    self.reasoning_effort.as_ref(),
+                    self.reasoning_summary.as_ref(),
+                    self.reasoning_context.as_ref(),
                     messages,
                     tools,
                 )
@@ -152,8 +168,8 @@ impl ModelClient {
         self.backend
     }
 
-    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
-        self.reasoning_effort
+    pub fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
     }
 
     async fn send_fireworks_chat(
@@ -172,7 +188,7 @@ impl ModelClient {
             "temperature": 0.0
         });
 
-        if let Some(effort) = self.reasoning_effort {
+        if let Some(effort) = &self.reasoning_effort {
             match effort {
                 ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High => {
                     request["reasoning_effort"] = Value::String(effort.as_str().to_string());
@@ -234,10 +250,18 @@ impl ModelClient {
             );
         }
 
-        if let Some(effort) = self.reasoning_effort {
-            request["reasoning"] = json!({
+        if let Some(effort) = &self.reasoning_effort {
+            let mut reasoning = json!({
                 "effort": effort.as_str(),
             });
+            if let Some(summary) = &self.reasoning_summary {
+                reasoning["summary"] = json!(summary.as_str());
+            }
+            if let Some(context) = &self.reasoning_context {
+                reasoning["context"] = json!(context.as_str());
+            }
+            request["reasoning"] = reasoning;
+            request["include"] = json!(["reasoning.encrypted_content"]);
         }
 
         tracing::debug!(
@@ -391,6 +415,8 @@ impl ModelClient {
             model: "gpt-5.5".to_string(),
             backend: BackendKind::OpenAiResponses,
             reasoning_effort: Some(ReasoningEffort::Xhigh),
+            reasoning_summary: None,
+            reasoning_context: None,
         }
     }
 }

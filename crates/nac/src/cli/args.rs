@@ -69,8 +69,16 @@ pub(super) struct ModelArgs {
     pub(super) backend: Option<BackendKind>,
 
     /// Reasoning effort to request when supported by the selected backend
-    #[arg(long = "effort", value_enum)]
+    #[arg(long = "effort", value_parser = parse_reasoning_effort_cli)]
     pub(super) reasoning_effort: Option<ReasoningEffort>,
+
+    /// Reasoning summary mode: auto, concise, or detailed
+    #[arg(long = "reasoning-summary", value_parser = parse_reasoning_summary_cli)]
+    pub(super) reasoning_summary: Option<ReasoningSummary>,
+
+    /// Reasoning context scope: current_turn or all_turns
+    #[arg(long = "reasoning-context", value_parser = parse_reasoning_context_cli)]
+    pub(super) reasoning_context: Option<ReasoningContext>,
 
     /// Internal API base URL override used by managed workers and resume
     #[arg(long, hide = true)]
@@ -272,5 +280,32 @@ pub(super) fn parse_cli_from(args: Vec<OsString>) -> ParsedCli {
         ParsedCli::Upgrade(UpgradeCli::parse_from(upgrade_args))
     } else {
         ParsedCli::Run(RunCli::parse_from(args))
+    }
+}
+
+fn parse_reasoning_effort_cli(s: &str) -> Result<ReasoningEffort, String> {
+    s.parse()
+}
+
+fn parse_reasoning_summary_cli(s: &str) -> Result<ReasoningSummary, String> {
+    match s {
+        "auto" => Ok(ReasoningSummary::Auto),
+        "concise" => Ok(ReasoningSummary::Concise),
+        "detailed" => Ok(ReasoningSummary::Detailed),
+        other => Err(format!(
+            "invalid reasoning summary '{}'; expected: auto, concise, detailed",
+            other
+        )),
+    }
+}
+
+fn parse_reasoning_context_cli(s: &str) -> Result<ReasoningContext, String> {
+    match s {
+        "current_turn" => Ok(ReasoningContext::CurrentTurn),
+        "all_turns" => Ok(ReasoningContext::AllTurns),
+        other => Err(format!(
+            "invalid reasoning context '{}'; expected: current_turn, all_turns",
+            other
+        )),
     }
 }

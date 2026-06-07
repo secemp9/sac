@@ -31,7 +31,11 @@ pub(super) fn parse_slash_command(prompt: &str) -> Option<Result<SlashCommand, S
             SlashCommand::Plan { instruction }
         }),
         "run" => parse_run_slash_command(args),
-        _ => Err(format!("unknown slash command: /{}", name)),
+        "goal" => parse_goal_slash_command(args),
+        _ => Ok(SlashCommand::Custom {
+            name: name.to_string(),
+            args: args.to_string(),
+        }),
     })
 }
 
@@ -61,7 +65,53 @@ pub(super) fn parse_run_slash_command(args: &str) -> Result<SlashCommand, String
     }
 }
 
-pub(super) fn expand_user_prompt(prompt: &str) -> String {
+fn parse_goal_slash_command(args: &str) -> Result<SlashCommand, String> {
+    let args = args.trim();
+    if args.is_empty() {
+        return Ok(SlashCommand::Goal {
+            subcommand: GoalSubcommand::Show,
+        });
+    }
+    let (sub, rest) = args
+        .split_once(char::is_whitespace)
+        .map(|(s, r)| (s, r.trim()))
+        .unwrap_or((args, ""));
+    match sub {
+        "clear" if rest.is_empty() => Ok(SlashCommand::Goal {
+            subcommand: GoalSubcommand::Clear,
+        }),
+        "pause" if rest.is_empty() => Ok(SlashCommand::Goal {
+            subcommand: GoalSubcommand::Pause,
+        }),
+        "resume" if rest.is_empty() => Ok(SlashCommand::Goal {
+            subcommand: GoalSubcommand::Resume,
+        }),
+        "set" if !rest.is_empty() => Ok(SlashCommand::Goal {
+            subcommand: GoalSubcommand::Set {
+                objective: rest.to_string(),
+            },
+        }),
+        "edit" if !rest.is_empty() => Ok(SlashCommand::Goal {
+            subcommand: GoalSubcommand::Edit {
+                objective: rest.to_string(),
+            },
+        }),
+        "clear" | "pause" | "resume" => Err(format!("usage: /goal {sub}")),
+        "set" => Err("usage: /goal set <objective>".to_string()),
+        "edit" => Err("usage: /goal edit <new objective>".to_string()),
+        _ => Ok(SlashCommand::Goal {
+            subcommand: GoalSubcommand::Set {
+                objective: args.to_string(),
+            },
+        }),
+    }
+}
+
+pub(super) fn expand_user_prompt(
+    prompt: &str,
+    command_registry: Option<&crate::commands::CommandRegistry>,
+    working_directory: &std::path::Path,
+) -> String {
     match parse_slash_command(prompt) {
         Some(Ok(SlashCommand::Plan { instruction })) => {
             tracing::info!(
@@ -74,6 +124,26 @@ pub(super) fn expand_user_prompt(prompt: &str) -> String {
         Some(Ok(SlashCommand::Run { workset_id })) => {
             tracing::info!(command = "/run", workset_id = %workset_id, "expanding slash command into run prompt");
             build_run_command_prompt(&workset_id)
+        }
+        Some(Ok(SlashCommand::Goal { subcommand: GoalSubcommand::Set { objective } })) => {
+            build_goal_initial_prompt(&objective)
+        }
+        Some(Ok(SlashCommand::Goal { subcommand: GoalSubcommand::Resume })) => {
+            // Resume is handled by auto-continuation; the prompt is already the continuation prompt
+            prompt.to_string()
+        }
+        Some(Ok(SlashCommand::Goal { .. })) => {
+            // Other goal subcommands (Show, Clear, Pause, Edit) don't produce prompts
+            prompt.to_string()
+        }
+        Some(Ok(SlashCommand::Custom { name, args })) => {
+            if let Some(registry) = command_registry {
+                registry
+                    .expand(&name, &args, working_directory)
+                    .unwrap_or_else(|| prompt.to_string())
+            } else {
+                prompt.to_string()
+            }
         }
         _ => prompt.to_string(),
     }
@@ -112,8 +182,25 @@ pub(super) fn build_run_command_prompt(workset_id: &str) -> String {
     )
 }
 
+pub(super) fn build_goal_initial_prompt(objective: &str) -> String {
+    format!(
+        "# /goal: Autonomous Goal Pursuit\n\n\
+         Goal objective:\n\
+         {objective}\n\n\
+         You have an active goal. Work toward this objective by dispatching threads.\n\
+         Use `get_goal` to review the current goal state.\n\
+         When the objective is fully satisfied, call `update_goal` with status \"complete\".\n\
+         If you are stuck and cannot make progress after multiple attempts, call `update_goal` with status \"blocked\".\n\
+         Each turn should make concrete progress. Dispatch bounded thread work, \
+         verify results, and continue toward the objective.\n"
+    )
+}
+
 pub(super) fn display_prompt_from_message(content: &str) -> String {
-    workset_command_display_prompt(content).unwrap_or_else(|| content.to_string())
+    workset_command_display_prompt(content)
+        .or_else(|| goal_command_display_prompt(content))
+        .or_else(|| custom_command_display_prompt(content))
+        .unwrap_or_else(|| content.to_string())
 }
 
 pub(super) fn workset_command_display_prompt(content: &str) -> Option<String> {
@@ -130,6 +217,32 @@ pub(super) fn workset_command_display_prompt(content: &str) -> Option<String> {
     };
     let value = content.split_once(marker)?.1.split_once("\n\n")?.0.trim();
     (!value.is_empty()).then(|| format!("/{kind} {value}"))
+}
+
+fn goal_command_display_prompt(content: &str) -> Option<String> {
+    let header = content.lines().next()?;
+    if header.starts_with("# /goal:") {
+        let objective = content.split_once("Goal objective:\n")?.1.split_once("\n\n")?.0.trim();
+        Some(format!("/goal {}", objective))
+    } else if header.starts_with("# Goal Continuation") {
+        let objective = content.split_once("Goal objective:\n")?.1.split_once("\n\n")?.0.trim();
+        let turn_info = header.strip_prefix("# Goal Continuation ")?;
+        Some(format!("/goal [continuation {}] {}", turn_info, objective))
+    } else {
+        None
+    }
+}
+
+fn custom_command_display_prompt(content: &str) -> Option<String> {
+    let header = content.lines().next()?;
+    let name = header.strip_prefix("# /")?.strip_suffix(": Custom Command")?;
+    let args_section = content.split_once("Arguments:\n")?.1;
+    let args = args_section.split_once("\n\n")?.0.trim();
+    if args == "(none)" || args.is_empty() {
+        Some(format!("/{}", name))
+    } else {
+        Some(format!("/{} {}", name, args))
+    }
 }
 
 pub(super) fn prompt_line(is_first: bool, content: &str, slash_mode: bool) -> Line<'static> {

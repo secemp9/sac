@@ -10,6 +10,8 @@ pub(super) struct McpConfigFile {
 pub(super) struct McpServerConfig {
     #[serde(default = "default_enabled")]
     pub(super) enabled: bool,
+    #[serde(default)]
+    pub(super) tool_call_timeout_secs: Option<u64>,
     #[serde(flatten)]
     pub(super) transport: McpTransportConfig,
 }

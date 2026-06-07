@@ -116,7 +116,7 @@ pub fn refresh_snapshot(
         model: snapshot.model.clone(),
         base_url: snapshot.base_url.clone(),
         backend: snapshot.backend,
-        reasoning_effort: snapshot.reasoning_effort,
+        reasoning_effort: snapshot.reasoning_effort.clone(),
         sandbox_spec: snapshot.sandbox_spec.clone(),
         messages,
         last_response_duration_ms,

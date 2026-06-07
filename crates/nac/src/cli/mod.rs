@@ -13,7 +13,7 @@ use crate::events::EventSink;
 use crate::mcp::McpRegistry;
 use crate::model::{
     codex_auth_login, codex_auth_logout, codex_auth_status, BackendKind, ClientOverrides,
-    ModelClient, ReasoningEffort,
+    ModelClient, ReasoningContext, ReasoningEffort, ReasoningSummary,
 };
 use crate::sandbox::{
     build_sandbox_spec, parse_mount_spec, SandboxSession, DEFAULT_SANDBOX_IMAGE,
@@ -503,7 +503,9 @@ fn model_overrides(model: &ModelArgs, config: &NacConfig) -> Result<ClientOverri
             .or_else(|| config.model.model.clone())
             .or_else(|| env_var("OPENAI_MODEL")),
         backend: model.backend.or(config.model.backend),
-        reasoning_effort: model.reasoning_effort.or(config.model.reasoning_effort),
+        reasoning_effort: model.reasoning_effort.clone().or_else(|| config.model.reasoning_effort.clone()),
+        reasoning_summary: model.reasoning_summary.clone().or_else(|| config.model.reasoning_summary.clone()),
+        reasoning_context: model.reasoning_context.clone().or_else(|| config.model.reasoning_context.clone()),
         api_key_env: configured_api_key_env(config),
         api_key: config
             .model
@@ -592,7 +594,7 @@ async fn build_run_cli_config(cli: RunCli, config: &NacConfig) -> Result<Orchest
         client.model.clone(),
         client.base_url().to_string(),
         client.backend(),
-        client.reasoning_effort(),
+        client.reasoning_effort().cloned(),
         sandbox.as_ref().map(|session| session.spec().clone()),
         agent.messages.clone(),
     );
@@ -740,6 +742,8 @@ mod tests {
         ModelArgs {
             backend: None,
             reasoning_effort: None,
+            reasoning_summary: None,
+            reasoning_context: None,
             api_base_url: None,
             api_model: None,
         }
@@ -838,6 +842,8 @@ mod tests {
             &ModelArgs {
                 backend: Some(BackendKind::DeepSeekChat),
                 reasoning_effort: Some(ReasoningEffort::Low),
+                reasoning_summary: None,
+                reasoning_context: None,
                 api_base_url: Some("https://cli.example/v1".to_string()),
                 api_model: Some("cli-model".to_string()),
             },

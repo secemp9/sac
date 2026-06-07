@@ -42,6 +42,10 @@ pub(super) struct App {
     pub(super) life_field: LifeField,
     pub(super) current_prompt: String,
     pub(super) clipboard: Option<arboard::Clipboard>,
+    pub(super) command_registry: Option<Arc<crate::commands::CommandRegistry>>,
+    pub(super) goal: Option<crate::goal::GoalState>,
+    pub(super) goal_pause_requested: bool,
+    pub(super) goal_clear_requested: bool,
 }
 
 impl App {
@@ -69,6 +73,7 @@ impl App {
         let workspace = WorkspaceSnapshot::load(&metadata.cwd, inspect_root.as_deref());
         let terminals = TerminalsSnapshot::default();
         let worksets = WorksetSnapshot::load(&metadata.store_path, metadata.session_id.as_deref());
+        let command_registry = crate::commands::CommandRegistry::load(Some(std::path::Path::new(&metadata.cwd)));
 
         let mut panel_scrolls = HashMap::new();
         panel_scrolls.insert(PanelId::Prompt, 0);
@@ -127,8 +132,13 @@ impl App {
             life_field: LifeField::default(),
             current_prompt: String::new(),
             clipboard: arboard::Clipboard::new().ok(),
+            command_registry,
+            goal: None,
+            goal_pause_requested: false,
+            goal_clear_requested: false,
         };
 
+        app.hydrate_goal_from_store();
         app.hydrate_threads_from_store();
         app.hydrate_all_episodes();
         app.hydrate_from_messages(restored_messages);
@@ -289,6 +299,23 @@ impl App {
                 self.toggle_focus_panel(pane_focus_panel_for_key(key).unwrap());
                 AppAction::None
             }
+            // Escape while agent is running with active goal: request deferred pause
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } if self.result_rx.is_some()
+                && self.goal.as_ref().is_some_and(|g| {
+                    g.status == crate::goal::GoalStatus::Active
+                })
+                && !matches!(self.screen, ScreenMode::Focused(_)) =>
+            {
+                self.goal_pause_requested = true;
+                self.show_composer_notice(
+                    "goal will pause after current turn completes",
+                    Tone::Warning,
+                );
+                tracing::info!("goal pause requested via Escape key");
+                AppAction::None
+            }
             KeyEvent {
                 code: KeyCode::Esc, ..
             } if matches!(self.screen, ScreenMode::Focused(_)) => {
@@ -418,7 +445,45 @@ impl App {
             } => {
                 let prompt = self.prompt();
                 let trimmed = prompt.trim();
-                if trimmed.is_empty() || self.result_rx.is_some() {
+                if trimmed.is_empty() {
+                    return AppAction::None;
+                }
+                if self.result_rx.is_some() {
+                    // While agent is running, only /goal pause, /goal clear,
+                    // and /goal (show) are allowed. These set deferred flags
+                    // that take effect when the current turn completes.
+                    if let Some(Ok(SlashCommand::Goal { ref subcommand })) =
+                        parse_slash_command(&prompt)
+                    {
+                        match subcommand {
+                            GoalSubcommand::Pause => {
+                                self.goal_pause_requested = true;
+                                self.clear_composer();
+                                self.show_composer_notice(
+                                    "goal will pause after current turn completes",
+                                    Tone::Warning,
+                                );
+                                tracing::info!("goal pause requested while agent is running");
+                                return AppAction::None;
+                            }
+                            GoalSubcommand::Clear => {
+                                self.goal_clear_requested = true;
+                                self.clear_composer();
+                                self.show_composer_notice(
+                                    "goal will clear after current turn completes",
+                                    Tone::Warning,
+                                );
+                                tracing::info!("goal clear requested while agent is running");
+                                return AppAction::None;
+                            }
+                            GoalSubcommand::Show => {
+                                self.clear_composer();
+                                self.show_goal_status();
+                                return AppAction::None;
+                            }
+                            _ => {}
+                        }
+                    }
                     return AppAction::None;
                 }
 
@@ -437,6 +502,67 @@ impl App {
                         }
                         Ok(SlashCommand::Plan { .. } | SlashCommand::Run { .. }) => {
                             tracing::info!(prompt = %prompt, "slash command accepted for expanded submission");
+                        }
+                        Ok(SlashCommand::Goal { subcommand }) => {
+                            match subcommand {
+                                GoalSubcommand::Show => {
+                                    self.clear_composer();
+                                    self.show_goal_status();
+                                    return AppAction::None;
+                                }
+                                GoalSubcommand::Clear => {
+                                    self.clear_goal();
+                                    self.clear_composer();
+                                    return AppAction::None;
+                                }
+                                GoalSubcommand::Pause => {
+                                    self.pause_goal();
+                                    self.clear_composer();
+                                    return AppAction::None;
+                                }
+                                GoalSubcommand::Resume => {
+                                    self.resume_goal();
+                                    self.clear_composer();
+                                    if self.goal_should_continue() {
+                                        return AppAction::Submit(
+                                            self.build_goal_continuation_prompt(),
+                                        );
+                                    }
+                                    return AppAction::None;
+                                }
+                                GoalSubcommand::Set { ref objective } => {
+                                    self.set_goal(objective.clone());
+                                    self.clear_composer();
+                                    tracing::info!(prompt = %prompt, "goal set");
+                                    // Fall through to Submit with goal initial prompt
+                                    return AppAction::Submit(prompt);
+                                }
+                                GoalSubcommand::Edit { objective } => {
+                                    self.edit_goal_objective(objective);
+                                    self.clear_composer();
+                                    return AppAction::None;
+                                }
+                            }
+                        }
+                        Ok(SlashCommand::Custom { ref name, .. }) => {
+                            if let Some(ref registry) = self.command_registry {
+                                if registry.has_command(name) {
+                                    tracing::info!(command = %name, "custom command accepted");
+                                } else {
+                                    tracing::warn!(command = %name, "unknown custom command");
+                                    self.show_composer_notice(
+                                        format!("unknown command: /{}", name),
+                                        Tone::Warning,
+                                    );
+                                    return AppAction::None;
+                                }
+                            } else {
+                                self.show_composer_notice(
+                                    format!("unknown command: /{}", name),
+                                    Tone::Warning,
+                                );
+                                return AppAction::None;
+                            }
                         }
                         Err(message) => {
                             tracing::warn!(prompt = %prompt, error = %message, "slash command rejected");
@@ -1162,6 +1288,9 @@ impl App {
                 }
                 if record.name.starts_with("workset_") {
                     self.refresh_worksets();
+                }
+                if record.name == "update_goal" {
+                    self.reload_goal_from_store();
                 }
 
                 let detail = if target.is_empty() {
@@ -3749,6 +3878,162 @@ impl App {
         }
         if let Some(ref mut clipboard) = self.clipboard {
             let _ = copy_text_to_clipboard(clipboard, &text);
+        }
+    }
+
+    // ── Goal methods ────────────────────────────────────────────────────
+
+    pub(super) fn hydrate_goal_from_store(&mut self) {
+        let Some(session_id) = self.metadata.session_id.as_deref() else { return };
+        if let Ok(Some(g)) = crate::goal::load_goal(&self.metadata.store_path, session_id) {
+            self.goal = Some(g);
+        }
+    }
+
+    pub(super) fn set_goal(&mut self, objective: String) {
+        let now = crate::goal::now_utc();
+        let goal = crate::goal::GoalState {
+            objective,
+            status: crate::goal::GoalStatus::Active,
+            turns_completed: 0,
+            max_turns: 10,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        if let Some(sid) = self.metadata.session_id.as_deref() {
+            let _ = crate::goal::save_goal(&self.metadata.store_path, sid, &goal);
+        }
+        self.goal = Some(goal);
+        self.push_timeline("goal", "goal set", Tone::Success);
+    }
+
+    pub(super) fn clear_goal(&mut self) {
+        if let Some(sid) = self.metadata.session_id.as_deref() {
+            let _ = crate::goal::delete_goal(&self.metadata.store_path, sid);
+        }
+        self.goal = None;
+        self.push_timeline("goal", "goal cleared", Tone::Warning);
+        self.show_composer_notice("goal cleared", Tone::Info);
+    }
+
+    pub(super) fn pause_goal(&mut self) {
+        if let Some(goal) = &mut self.goal {
+            goal.status = crate::goal::GoalStatus::Paused;
+            goal.updated_at = crate::goal::now_utc();
+            if let Some(sid) = self.metadata.session_id.as_deref() {
+                let _ = crate::goal::save_goal(&self.metadata.store_path, sid, goal);
+            }
+            self.push_timeline("goal", "goal paused", Tone::Warning);
+            self.show_composer_notice("goal paused", Tone::Info);
+        } else {
+            self.show_composer_notice("no active goal", Tone::Warning);
+        }
+    }
+
+    pub(super) fn resume_goal(&mut self) {
+        if let Some(goal) = &mut self.goal {
+            goal.status = crate::goal::GoalStatus::Active;
+            goal.updated_at = crate::goal::now_utc();
+            if let Some(sid) = self.metadata.session_id.as_deref() {
+                let _ = crate::goal::save_goal(&self.metadata.store_path, sid, goal);
+            }
+            self.push_timeline("goal", "goal resumed", Tone::Success);
+            self.show_composer_notice("goal resumed", Tone::Success);
+        } else {
+            self.show_composer_notice("no goal to resume", Tone::Warning);
+        }
+    }
+
+    pub(super) fn edit_goal_objective(&mut self, new_objective: String) {
+        if let Some(goal) = &mut self.goal {
+            goal.objective = new_objective;
+            goal.updated_at = crate::goal::now_utc();
+            if let Some(sid) = self.metadata.session_id.as_deref() {
+                let _ = crate::goal::save_goal(&self.metadata.store_path, sid, goal);
+            }
+            self.push_timeline("goal", "objective updated", Tone::Info);
+            self.show_composer_notice("goal objective updated", Tone::Info);
+        } else {
+            self.show_composer_notice("no active goal to edit", Tone::Warning);
+        }
+    }
+
+    pub(super) fn show_goal_status(&mut self) {
+        match &self.goal {
+            Some(goal) => {
+                let msg = format!(
+                    "goal: {} | status: {} | turns: {}/{}",
+                    goal.objective,
+                    goal.status.label(),
+                    goal.turns_completed,
+                    goal.max_turns
+                );
+                self.show_composer_notice(msg, Tone::Info);
+            }
+            None => {
+                self.show_composer_notice("no active goal. Usage: /goal <objective>", Tone::Muted);
+            }
+        }
+    }
+
+    pub(super) fn goal_should_continue(&self) -> bool {
+        self.goal.as_ref().is_some_and(|g| {
+            g.status.is_continuable() && g.turns_completed < g.max_turns
+        })
+    }
+
+    pub(super) fn increment_goal_turn(&mut self) {
+        if let Some(goal) = &mut self.goal {
+            goal.turns_completed += 1;
+            goal.updated_at = crate::goal::now_utc();
+            if let Some(sid) = self.metadata.session_id.as_deref() {
+                let _ = crate::goal::save_goal(&self.metadata.store_path, sid, goal);
+            }
+        }
+    }
+
+    pub(super) fn goal_hit_turn_limit(&mut self) {
+        if let Some(goal) = &mut self.goal {
+            goal.status = crate::goal::GoalStatus::Paused;
+            goal.updated_at = crate::goal::now_utc();
+            if let Some(sid) = self.metadata.session_id.as_deref() {
+                let _ = crate::goal::save_goal(&self.metadata.store_path, sid, goal);
+            }
+        }
+        if let Some(goal) = &self.goal {
+            let turns = goal.turns_completed;
+            let max = goal.max_turns;
+            self.push_timeline("goal", format!("turn limit ({}/{})", turns, max), Tone::Warning);
+            self.show_composer_notice(
+                format!("goal paused: turn limit reached ({}/{}). /goal resume to continue", turns, max),
+                Tone::Warning,
+            );
+        }
+    }
+
+    pub(super) fn build_goal_continuation_prompt(&self) -> String {
+        let goal = self.goal.as_ref().expect("called only when goal is active");
+        format!(
+            "# Goal Continuation (turn {}/{})\n\n\
+             Goal objective:\n\
+             {}\n\n\
+             Review the progress from your previous turn. Assess what was accomplished, \
+             what remains, and what the most productive next action is.\n\
+             Use `get_goal` to check the current goal state.\n\
+             If the goal is fully satisfied, call `update_goal` with status \"complete\".\n\
+             If you are stuck after multiple attempts, call `update_goal` with status \"blocked\".\n\
+             Otherwise, dispatch the next bounded unit of work toward the objective.\n",
+            goal.turns_completed + 1,
+            goal.max_turns,
+            goal.objective,
+        )
+    }
+
+    pub(super) fn reload_goal_from_store(&mut self) {
+        let Some(sid) = self.metadata.session_id.as_deref() else { return };
+        match crate::goal::load_goal(&self.metadata.store_path, sid) {
+            Ok(goal) => { self.goal = goal; }
+            Err(e) => { tracing::warn!(error = %e, "failed to reload goal from store"); }
         }
     }
 }

@@ -14,6 +14,7 @@ struct McpToolBinding {
 
 struct McpServer {
     _service: Arc<McpService>,
+    tool_call_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -128,8 +129,13 @@ impl McpRegistry {
                 }
             };
 
+            let tool_call_timeout = server_config
+                .tool_call_timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or(MCP_TOOL_CALL_TIMEOUT);
             let server = Arc::new(McpServer {
                 _service: service.clone(),
+                tool_call_timeout,
             });
             for tool in listed_tools {
                 let qualified_name = allocate_tool_name(&server_name, &tool.name, &mut seen_names);
@@ -187,8 +193,9 @@ impl McpRegistry {
         if let Some(arguments) = arguments {
             params = params.with_arguments(arguments);
         }
+        let tool_timeout = binding.server.tool_call_timeout;
         match timeout(
-            MCP_TOOL_CALL_TIMEOUT,
+            tool_timeout,
             binding.server._service.call_tool(params),
         )
         .await
@@ -202,7 +209,7 @@ impl McpRegistry {
                 content: format!(
                     "Error calling MCP tool '{}': timed out after {}s",
                     name,
-                    MCP_TOOL_CALL_TIMEOUT.as_secs()
+                    tool_timeout.as_secs()
                 ),
                 is_error: true,
             },
