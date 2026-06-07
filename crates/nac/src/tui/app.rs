@@ -46,6 +46,7 @@ pub(super) struct App {
     pub(super) goal: Option<crate::goal::GoalState>,
     pub(super) goal_pause_requested: bool,
     pub(super) goal_clear_requested: bool,
+    pub(super) slash_popup: Option<SlashPopup>,
 }
 
 impl App {
@@ -136,8 +137,10 @@ impl App {
             goal: None,
             goal_pause_requested: false,
             goal_clear_requested: false,
+            slash_popup: None,
         };
 
+        app.init_slash_popup();
         app.hydrate_goal_from_store();
         app.hydrate_threads_from_store();
         app.hydrate_all_episodes();
@@ -187,6 +190,97 @@ impl App {
         {
             self.composer_notice = None;
         }
+    }
+
+    pub(super) fn init_slash_popup(&mut self) {
+        let mut entries = Vec::new();
+
+        // Built-in commands
+        for (name, desc) in [
+            ("exit", "Quit nac"),
+            ("sessions", "Open session picker"),
+            ("plan", "Create a workset plan"),
+            ("run", "Execute a workset"),
+            ("goal", "Set or manage an autonomous goal"),
+            ("goal clear", "Clear the current goal"),
+            ("goal pause", "Pause goal auto-continuation"),
+            ("goal resume", "Resume goal auto-continuation"),
+            ("goal edit", "Edit the goal objective"),
+        ] {
+            entries.push(SlashCommandEntry {
+                name: name.to_string(),
+                description: desc.to_string(),
+            });
+        }
+
+        // Custom commands from registry
+        if let Some(ref registry) = self.command_registry {
+            for entry in registry.catalog_entries() {
+                entries.push(SlashCommandEntry {
+                    name: entry.name.clone(),
+                    description: entry.description.clone(),
+                });
+            }
+        }
+
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        self.slash_popup = Some(SlashPopup::new(entries));
+    }
+
+    pub(super) fn sync_slash_popup(&mut self) {
+        let Some(popup) = &mut self.slash_popup else {
+            return;
+        };
+
+        let lines = self.composer.lines();
+        let first_line = lines.first().map(|s| s.as_str()).unwrap_or("");
+        let (cursor_row, _cursor_col) = self.composer.cursor();
+
+        // Only show popup when:
+        // 1. First line starts with "/"
+        // 2. Cursor is on the first line
+        // 3. Agent is not running
+        if !first_line.starts_with('/') || cursor_row != 0 || self.result_rx.is_some() {
+            popup.visible = false;
+            return;
+        }
+
+        // Extract the command name being typed (first word after "/")
+        let after_slash = &first_line[1..];
+        let filter = after_slash
+            .split_once(char::is_whitespace)
+            .map(|(name, _)| name)
+            .unwrap_or(after_slash);
+
+        popup.update_filter(filter);
+        popup.visible = true;
+    }
+
+    pub(super) fn complete_slash_command(&mut self, command_name: &str) {
+        // Get current text to preserve any trailing args
+        let lines = self.composer.lines();
+        let first_line = lines.first().map(|s| s.as_str()).unwrap_or("");
+
+        // Extract any args after the command name
+        let tail = if let Some(after_slash) = first_line.strip_prefix('/') {
+            after_slash
+                .split_once(char::is_whitespace)
+                .map(|(_, rest)| rest.to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Build the completed text
+        let completed = if tail.is_empty() {
+            format!("/{} ", command_name)
+        } else {
+            format!("/{} {}", command_name, tail)
+        };
+
+        // Replace composer content
+        self.composer = build_composer();
+        self.composer.insert_str(&completed);
     }
 
     pub(super) fn handle_paste(&mut self, text: &str) -> AppAction {
@@ -274,6 +368,57 @@ impl App {
                 }
                 _ => AppAction::None,
             };
+        }
+
+        // Slash popup key handling
+        if let Some(ref mut popup) = self.slash_popup {
+            if popup.visible && !popup.is_empty() {
+                match key {
+                    KeyEvent {
+                        code: KeyCode::Up, ..
+                    }
+                    | KeyEvent {
+                        code: KeyCode::Char('p'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    } => {
+                        popup.move_up();
+                        return AppAction::None;
+                    }
+                    KeyEvent {
+                        code: KeyCode::Down,
+                        ..
+                    }
+                    | KeyEvent {
+                        code: KeyCode::Char('n'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    } => {
+                        popup.move_down();
+                        return AppAction::None;
+                    }
+                    KeyEvent {
+                        code: KeyCode::Tab, ..
+                    } => {
+                        if let Some(entry) = popup.selected_entry().cloned() {
+                            self.complete_slash_command(&entry.name);
+                            if let Some(p) = &mut self.slash_popup {
+                                p.visible = false;
+                            }
+                        }
+                        return AppAction::None;
+                    }
+                    KeyEvent {
+                        code: KeyCode::Esc, ..
+                    } => {
+                        popup.visible = false;
+                        return AppAction::None;
+                    }
+                    _ => {
+                        // Fall through to normal handling, then sync popup after
+                    }
+                }
+            }
         }
 
         match key {
@@ -593,6 +738,7 @@ impl App {
                 if self.result_rx.is_none() {
                     self.clear_composer_notice();
                     self.composer.input(key);
+                    self.sync_slash_popup();
                 }
                 AppAction::None
             }
@@ -3571,6 +3717,11 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ));
             frame.render_widget(Paragraph::new(notice_line), notice_area);
+        }
+
+        // Render slash popup above composer
+        if let Some(ref popup) = self.slash_popup {
+            popup.render_popup(frame, area);
         }
     }
 
