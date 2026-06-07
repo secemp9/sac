@@ -90,6 +90,7 @@ pub(super) enum PanelId {
     ThreadList,
     ThreadEpisodes,
     CompactStream,
+    Stream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +105,9 @@ pub(crate) struct TimelineEntry {
     pub(crate) actor: String,
     pub(crate) detail: String,
     pub(crate) tone: Tone,
+    /// Index into `recent_tools` when this entry was created from a ToolCallFinished event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_record_index: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +137,7 @@ pub(super) struct ToolRecord {
     pub(super) status: ToolStatus,
     pub(super) duration: Duration,
     pub(super) summary: String,
+    pub(super) content: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -376,6 +381,7 @@ pub(super) enum FocusPanel {
     Workspace,
     Worksets,
     FileChanges,
+    Stream,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,7 +391,7 @@ pub(super) struct PaneFocusBinding {
     pub(super) mnemonic: char,
 }
 
-pub(super) const PANE_FOCUS_BINDINGS: [PaneFocusBinding; 10] = [
+pub(super) const PANE_FOCUS_BINDINGS: [PaneFocusBinding; 11] = [
     PaneFocusBinding {
         panel: FocusPanel::Prompt,
         label: "Prompts",
@@ -435,6 +441,11 @@ pub(super) const PANE_FOCUS_BINDINGS: [PaneFocusBinding; 10] = [
         panel: FocusPanel::FileChanges,
         label: "File Changes",
         mnemonic: 'f',
+    },
+    PaneFocusBinding {
+        panel: FocusPanel::Stream,
+        label: "Stream",
+        mnemonic: 's',
     },
 ];
 
@@ -496,4 +507,16 @@ pub(super) struct ComposerNotice {
     pub(super) text: String,
     pub(super) tone: Tone,
     pub(super) expires_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum StreamEntry {
+    UserPrompt { text: String, timestamp: String },
+    ModelTurn { iteration: usize, timestamp: String },
+    ToolCall { name: String, target: String, timestamp: String },
+    ToolResult { name: String, content: Option<String>, is_error: bool, duration_ms: u64, timestamp: String },
+    ThreadStarted { name: String, action: String, timestamp: String },
+    ThreadFinished { name: String, exit_code: i32, timestamp: String },
+    AssistantText { text: String, thread_name: Option<String>, timestamp: String },
+    StreamingDelta { text: String, thread_name: Option<String>, timestamp: String },
 }

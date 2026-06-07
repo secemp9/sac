@@ -27,6 +27,8 @@ pub enum AgentEvent {
         call_id: String,
         name: String,
         content_preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
         is_error: bool,
     },
     ThreadStarted {
@@ -64,6 +66,14 @@ pub enum AgentEvent {
         message: String,
     },
     RunFinished {
+        thread_name: Option<String>,
+    },
+    StreamTextDelta {
+        thread_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    StreamComplete {
         thread_name: Option<String>,
     },
 }

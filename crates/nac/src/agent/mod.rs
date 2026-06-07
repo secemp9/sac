@@ -218,8 +218,12 @@ impl Agent {
         }
         messages.extend(config.initial_messages);
 
+        let mut model_client = client;
+        model_client.set_event_sink(config.event_sink.clone());
+        model_client.set_thread_name(config.thread_name.clone());
+
         Self {
-            client,
+            client: model_client,
             messages,
             tool_defs,
             tool_runtime: ToolRuntime {
@@ -382,7 +386,8 @@ impl Agent {
 
     pub fn set_event_sink(&mut self, sink: EventSink) {
         self.event_sink = sink.clone();
-        self.tool_runtime.event_sink = sink;
+        self.tool_runtime.event_sink = sink.clone();
+        self.client.set_event_sink(sink);
     }
 
     pub fn restore_messages(&mut self, messages: Vec<Message>) {

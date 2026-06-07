@@ -51,11 +51,17 @@ pub(super) async fn execute_tools_parallel(
     while let Some(join_result) = join_set.join_next().await {
         match join_result {
             Ok((index, tool_call_id, tool_name, result)) => {
+                let content_full = if result.content.len() <= 51200 {
+                    Some(result.content.clone())
+                } else {
+                    None // too large, skip full content
+                };
                 event_sink.emit(AgentEvent::ToolCallFinished {
                     thread_name: thread_name.clone(),
                     call_id: tool_call_id.clone(),
                     name: tool_name.clone(),
                     content_preview: preview_tool_result(&tool_name, &result),
+                    content: content_full,
                     is_error: result.is_error,
                 });
                 results.push((index, tool_call_id, tool_name, result));

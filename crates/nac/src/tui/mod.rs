@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -857,6 +857,7 @@ mod tests {
             call_id: "call-workset".to_string(),
             name: "workset_define".to_string(),
             content_preview: "Saved workset 'plan-ui' with 1 item(s).".to_string(),
+            content: None,
             is_error: false,
         });
 
@@ -1668,6 +1669,7 @@ mod tests {
             call_id: "call-1".to_string(),
             name: "edit".to_string(),
             content_preview: "ok".to_string(),
+            content: None,
             is_error: false,
         });
 

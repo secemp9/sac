@@ -11,6 +11,8 @@ pub struct ModelClient {
     reasoning_effort: Option<ReasoningEffort>,
     reasoning_summary: Option<ReasoningSummary>,
     reasoning_context: Option<ReasoningContext>,
+    event_sink: Option<EventSink>,
+    thread_name: Option<String>,
 }
 
 impl ModelClient {
@@ -76,6 +78,8 @@ impl ModelClient {
             reasoning_effort,
             reasoning_summary,
             reasoning_context,
+            event_sink: None,
+            thread_name: None,
         })
     }
 
@@ -172,6 +176,14 @@ impl ModelClient {
         self.reasoning_effort.as_ref()
     }
 
+    pub fn set_event_sink(&mut self, sink: EventSink) {
+        self.event_sink = Some(sink);
+    }
+
+    pub fn set_thread_name(&mut self, name: Option<String>) {
+        self.thread_name = name;
+    }
+
     async fn send_fireworks_chat(
         &self,
         messages: Vec<Message>,
@@ -264,6 +276,19 @@ impl ModelClient {
             request["include"] = json!(["reasoning.encrypted_content"]);
         }
 
+        // Use streaming path when event_sink is available
+        if self.event_sink.is_some() {
+            request["stream"] = json!(true);
+            tracing::debug!(
+                backend = ?self.backend,
+                endpoint = "responses",
+                request_bytes = json_value_len_bytes(&request)?,
+                streaming = true,
+                "built openai responses request (streaming)"
+            );
+            return self.post_streaming_openai_responses(&url, &request).await;
+        }
+
         tracing::debug!(
             backend = ?self.backend,
             endpoint = "responses",
@@ -272,6 +297,259 @@ impl ModelClient {
         );
         let value = self.post_json_with_retry(&url, &request).await?;
         parse_openai_responses_response(&value, &url)
+    }
+
+    async fn post_streaming_openai_responses(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<ModelTurnResponse> {
+        let event_sink = self.event_sink.as_ref().unwrap();
+        let thread_name = self.thread_name.clone();
+        let mut last_error = anyhow!("No attempts made");
+        let request_bytes = json_value_len_bytes(body)?;
+
+        for attempt in 0..3 {
+            if attempt > 0 {
+                let delay_secs = 1u64 << (attempt - 1);
+                tracing::warn!(
+                    backend = ?self.backend,
+                    endpoint = "responses_stream",
+                    attempt = attempt + 1,
+                    backoff_secs = delay_secs,
+                    "retrying streaming model HTTP request after backoff"
+                );
+                sleep(Duration::from_secs(delay_secs)).await;
+            }
+
+            let attempt_started = Instant::now();
+            tracing::debug!(
+                backend = ?self.backend,
+                endpoint = "responses_stream",
+                attempt = attempt + 1,
+                request_bytes,
+                "starting streaming model HTTP attempt"
+            );
+
+            let response = self
+                .client
+                .post(url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(body)
+                .send()
+                .await
+                .map_err(|e| anyhow!("HTTP request failed for {}: {}", url, e))?;
+
+            let status = response.status();
+
+            if status.is_success() {
+                tracing::info!(
+                    backend = ?self.backend,
+                    endpoint = "responses_stream",
+                    attempt = attempt + 1,
+                    status = status.as_u16(),
+                    request_bytes,
+                    latency_ms = attempt_started.elapsed().as_millis() as u64,
+                    "streaming model HTTP connected"
+                );
+
+                // Read the stream incrementally
+                let result = self
+                    .read_sse_stream(response, event_sink, &thread_name, url)
+                    .await;
+
+                event_sink.emit(AgentEvent::StreamComplete {
+                    thread_name: thread_name.clone(),
+                });
+
+                return result;
+            }
+
+            // Read the error body for non-success status
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "[failed to read body]".to_string());
+
+            if status.as_u16() == 429 || status.is_server_error() {
+                tracing::warn!(
+                    backend = ?self.backend,
+                    endpoint = "responses_stream",
+                    attempt = attempt + 1,
+                    status = status.as_u16(),
+                    request_bytes,
+                    latency_ms = attempt_started.elapsed().as_millis() as u64,
+                    retryable = true,
+                    "streaming model HTTP attempt failed with retryable status"
+                );
+                last_error = anyhow!(
+                    "HTTP {} from {}: {}",
+                    status.as_u16(),
+                    url,
+                    &error_body[..error_body.len().min(500)]
+                );
+                continue;
+            }
+
+            tracing::error!(
+                backend = ?self.backend,
+                endpoint = "responses_stream",
+                attempt = attempt + 1,
+                status = status.as_u16(),
+                request_bytes,
+                latency_ms = attempt_started.elapsed().as_millis() as u64,
+                retryable = false,
+                "streaming model HTTP attempt failed with non-retryable status"
+            );
+            return Err(anyhow!(
+                "HTTP {} from {}: {}",
+                status.as_u16(),
+                url,
+                &error_body[..error_body.len().min(500)]
+            ));
+        }
+
+        Err(last_error)
+    }
+
+    async fn read_sse_stream(
+        &self,
+        response: reqwest::Response,
+        event_sink: &EventSink,
+        thread_name: &Option<String>,
+        url: &str,
+    ) -> Result<ModelTurnResponse> {
+        use futures_util::StreamExt;
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut output_items: Vec<(usize, Value)> = Vec::new();
+        let mut final_response: Option<Value> = None;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(|e| anyhow!("Stream read error: {}", e))?;
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&chunk_str);
+
+            // Process complete SSE events (separated by \n\n)
+            while let Some(boundary) = buffer.find("\n\n") {
+                let event_block = buffer[..boundary].to_string();
+                buffer = buffer[boundary + 2..].to_string();
+
+                // Parse the SSE event block
+                let mut event_type = String::new();
+                let mut data_parts: Vec<String> = Vec::new();
+
+                for line in event_block.lines() {
+                    if let Some(value) = line.strip_prefix("event:") {
+                        event_type = value.trim().to_string();
+                    } else if let Some(value) = line.strip_prefix("data:") {
+                        let trimmed = value.trim_start();
+                        data_parts.push(trimmed.to_string());
+                    }
+                }
+
+                if data_parts.is_empty() {
+                    continue;
+                }
+
+                let data = data_parts.join("\n");
+                if data == "[DONE]" {
+                    break;
+                }
+
+                let event: Value = match serde_json::from_str(&data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let etype = event_type.as_str();
+                let json_type = event
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+
+                match etype.is_empty().then_some(json_type).unwrap_or(etype) {
+                    "response.output_text.delta" => {
+                        if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                            event_sink.emit(AgentEvent::StreamTextDelta {
+                                thread_name: thread_name.clone(),
+                                text: Some(delta.to_string()),
+                            });
+                        }
+                    }
+                    "response.output_item.done" => {
+                        if let Some(item) = event.get("item").cloned() {
+                            let output_index = event
+                                .get("output_index")
+                                .and_then(Value::as_u64)
+                                .and_then(|i| usize::try_from(i).ok())
+                                .unwrap_or(output_items.len());
+                            output_items.retain(|(idx, _)| *idx != output_index);
+                            output_items.push((output_index, item));
+                        }
+                    }
+                    "response.completed" | "response.done" | "response.incomplete" => {
+                        if let Some(resp) = event.get("response").and_then(Value::as_object) {
+                            let mut response_value = Value::Object(resp.clone());
+                            // If the terminal event has empty output, use accumulated items
+                            let output_is_empty = response_value
+                                .get("output")
+                                .and_then(Value::as_array)
+                                .map(Vec::is_empty)
+                                .unwrap_or(true);
+                            if output_is_empty && !output_items.is_empty() {
+                                output_items.sort_by_key(|(idx, _)| *idx);
+                                response_value["output"] = Value::Array(
+                                    output_items
+                                        .iter()
+                                        .map(|(_, item)| item.clone())
+                                        .collect(),
+                                );
+                            }
+                            final_response = Some(response_value);
+                        }
+                    }
+                    "error" | "response.failed" => {
+                        let msg = event
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(Value::as_str)
+                            .or_else(|| event.get("message").and_then(Value::as_str))
+                            .unwrap_or("Unknown streaming error");
+                        return Err(anyhow!("Streaming error from {}: {}", url, msg));
+                    }
+                    _ => {}
+                }
+            }
+
+            if final_response.is_some() {
+                break;
+            }
+        }
+
+        // Parse the final response
+        match final_response {
+            Some(value) => parse_openai_responses_response(&value, url),
+            None => {
+                // Fallback: if no terminal event but we have output_items, build response
+                if !output_items.is_empty() {
+                    output_items.sort_by_key(|(idx, _)| *idx);
+                    let constructed = json!({
+                        "status": "completed",
+                        "output": output_items.iter().map(|(_, item)| item.clone()).collect::<Vec<_>>(),
+                        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                    });
+                    parse_openai_responses_response(&constructed, url)
+                } else {
+                    Err(anyhow!(
+                        "SSE stream from {} ended without a terminal response event",
+                        url
+                    ))
+                }
+            }
+        }
     }
 
     async fn post_json_with_retry(&self, url: &str, body: &Value) -> Result<Value> {
@@ -417,6 +695,8 @@ impl ModelClient {
             reasoning_effort: Some(ReasoningEffort::Xhigh),
             reasoning_summary: None,
             reasoning_context: None,
+            event_sink: None,
+            thread_name: None,
         }
     }
 }

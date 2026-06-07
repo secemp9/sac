@@ -518,6 +518,7 @@ impl WorkerTimeoutTrace {
             AgentEvent::ThreadStarted { .. }
             | AgentEvent::ThreadSpawned { .. }
             | AgentEvent::ThreadFinished { .. } => {}
+            AgentEvent::StreamTextDelta { .. } | AgentEvent::StreamComplete { .. } => {}
         }
     }
 

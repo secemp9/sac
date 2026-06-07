@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use url::Url;
 
+use crate::events::{AgentEvent, EventSink};
 use crate::types::{FunctionCall, Message, ToolCall, ToolDefinition, Usage};
 
 mod backend;

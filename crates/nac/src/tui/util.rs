@@ -29,6 +29,7 @@ pub(super) fn panel_is_selectable(panel: PanelId) -> bool {
             | PanelId::Tools
             | PanelId::Terminals
             | PanelId::Worksets
+            | PanelId::Stream
     )
 }
 

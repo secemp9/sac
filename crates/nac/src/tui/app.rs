@@ -49,6 +49,9 @@ pub(super) struct App {
     pub(super) slash_popup: Option<SlashPopup>,
     pub(super) history_index: Option<usize>,
     pub(super) history_draft: Option<String>,
+    pub(super) expanded_tool_indices: HashSet<usize>,
+    pub(super) stream_entries: Vec<StreamEntry>,
+    pub(super) streaming_text: String,
 }
 
 impl App {
@@ -92,6 +95,7 @@ impl App {
         panel_scrolls.insert(PanelId::ThreadList, 0);
         panel_scrolls.insert(PanelId::ThreadEpisodes, 0);
         panel_scrolls.insert(PanelId::CompactStream, usize::MAX);
+        panel_scrolls.insert(PanelId::Stream, usize::MAX);
 
         let mut app = Self {
             metadata,
@@ -142,6 +146,9 @@ impl App {
             slash_popup: None,
             history_index: None,
             history_draft: None,
+            expanded_tool_indices: HashSet::new(),
+            stream_entries: Vec::new(),
+            streaming_text: String::new(),
         };
 
         app.init_slash_popup();
@@ -620,6 +627,17 @@ impl App {
                 self.select_newer_prompt();
                 AppAction::None
             }
+            // Toggle expansion in focused Events view
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers,
+                ..
+            } if modifiers == KeyModifiers::NONE
+                && matches!(self.screen, ScreenMode::Focused(FocusPanel::Events)) =>
+            {
+                self.toggle_event_expansion();
+                AppAction::None
+            }
             KeyEvent {
                 code: KeyCode::PageUp,
                 ..
@@ -1016,6 +1034,7 @@ impl App {
     }
 
     pub(super) fn complete_top_level_response(&mut self, content: String, duration: Duration) {
+        self.streaming_text.clear();
         self.responses.push(ResponseEntry {
             content: content.clone(),
             duration: Some(duration),
@@ -1271,6 +1290,7 @@ impl App {
             ScreenMode::Focused(FocusPanel::Workspace) => PanelId::Workspace,
             ScreenMode::Focused(FocusPanel::Worksets) => PanelId::Worksets,
             ScreenMode::Focused(FocusPanel::FileChanges) => PanelId::FileChanges,
+            ScreenMode::Focused(FocusPanel::Stream) => PanelId::Stream,
             ScreenMode::Dashboard if matches!(self.ui_mode, UiMode::Compact) => {
                 PanelId::CompactStream
             }
@@ -1482,9 +1502,18 @@ impl App {
                 thread_name,
                 prompt_preview,
             } => {
+                if thread_name.is_none() {
+                    self.streaming_text.clear();
+                }
                 if thread_name.is_none() && self.prompts.is_empty() {
                     self.prompts.push(prompt_preview.clone());
                     self.selected_prompt = self.latest_prompt_index();
+                }
+                if thread_name.is_none() {
+                    self.stream_entries.push(StreamEntry::UserPrompt {
+                        text: prompt_preview.clone(),
+                        timestamp: utc_hms(),
+                    });
                 }
                 let actor = thread_name.unwrap_or_else(|| "orchestrator".to_string());
                 self.push_timeline(
@@ -1499,6 +1528,10 @@ impl App {
             } => {
                 let actor = thread_name.unwrap_or_else(|| "model".to_string());
                 self.push_timeline(actor, format!("model turn {iteration}"), Tone::Muted);
+                self.stream_entries.push(StreamEntry::ModelTurn {
+                    iteration,
+                    timestamp: utc_hms(),
+                });
             }
             AgentEvent::ToolCallStarted {
                 thread_name,
@@ -1522,12 +1555,18 @@ impl App {
                 );
                 let actor = thread_name.unwrap_or_else(|| "orchestrator".to_string());
                 self.push_timeline(actor, format!("{name} • {args_preview}"), Tone::Info);
+                self.stream_entries.push(StreamEntry::ToolCall {
+                    name: name.clone(),
+                    target: args_preview.clone(),
+                    timestamp: utc_hms(),
+                });
             }
             AgentEvent::ToolCallFinished {
                 thread_name,
                 call_id,
                 name,
                 content_preview,
+                content,
                 is_error,
             } => {
                 if thread_name.is_none() && name == "thread" {
@@ -1560,6 +1599,7 @@ impl App {
                     status,
                     duration,
                     summary: content_preview.clone(),
+                    content,
                 };
                 self.recent_tools.push_front(record.clone());
                 while self.recent_tools.len() > TOOL_HISTORY_LIMIT {
@@ -1583,7 +1623,20 @@ impl App {
                 } else {
                     format!("{target} • {}", record.summary)
                 };
-                self.push_timeline(actor, format!("{name} • {detail}"), status.tone());
+                // The tool record was push_front'd so it's at index 0
+                self.push_timeline_with_tool(
+                    actor,
+                    format!("{name} • {detail}"),
+                    status.tone(),
+                    0,
+                );
+                self.stream_entries.push(StreamEntry::ToolResult {
+                    name: record.name.clone(),
+                    content: record.content.clone(),
+                    is_error,
+                    duration_ms: duration_to_millis_u64(duration),
+                    timestamp: utc_hms(),
+                });
             }
             AgentEvent::ThreadStarted {
                 name,
@@ -1616,7 +1669,12 @@ impl App {
                         source_threads.join(", ")
                     )
                 };
-                self.push_timeline(name, detail, Tone::Success);
+                self.push_timeline(name.clone(), detail, Tone::Success);
+                self.stream_entries.push(StreamEntry::ThreadStarted {
+                    name,
+                    action,
+                    timestamp: utc_hms(),
+                });
             }
             AgentEvent::ThreadSpawned {
                 name,
@@ -1686,6 +1744,11 @@ impl App {
                 } else {
                     format!("thread complete • exit {exit_code}")
                 };
+                self.stream_entries.push(StreamEntry::ThreadFinished {
+                    name: name.clone(),
+                    exit_code,
+                    timestamp: utc_hms(),
+                });
                 self.push_timeline(
                     name,
                     detail,
@@ -1700,15 +1763,20 @@ impl App {
                 thread_name,
                 content,
             } => match thread_name {
-                Some(thread_name) => {
-                    if let Some(thread) = self.threads.get_mut(&thread_name) {
+                Some(ref thread_name) => {
+                    if let Some(thread) = self.threads.get_mut(thread_name) {
                         thread.updated_at = utc_hms();
                         thread.updated_at_ts = current_unix_ts();
                         thread.summary = truncate_episode_preview(&content);
                     }
                     self.hydrate_all_episodes();
+                    self.stream_entries.push(StreamEntry::AssistantText {
+                        text: content.clone(),
+                        thread_name: Some(thread_name.clone()),
+                        timestamp: utc_hms(),
+                    });
                     self.push_timeline(
-                        thread_name,
+                        thread_name.clone(),
                         format!(
                             "retained episode • {}",
                             fit_text(&truncate_episode_preview(&content), 110)
@@ -1737,6 +1805,22 @@ impl App {
                 let actor = thread_name.unwrap_or_else(|| "run".to_string());
                 self.push_timeline(actor, "run finished".to_string(), Tone::Muted);
             }
+            AgentEvent::StreamTextDelta { thread_name, text } => {
+                if let Some(delta) = text {
+                    self.streaming_text.push_str(&delta);
+                }
+                let _ = thread_name;
+            }
+            AgentEvent::StreamComplete { thread_name } => {
+                if !self.streaming_text.is_empty() {
+                    self.stream_entries.push(StreamEntry::StreamingDelta {
+                        text: std::mem::take(&mut self.streaming_text),
+                        thread_name: thread_name.clone(),
+                        timestamp: utc_hms(),
+                    });
+                }
+                let _ = thread_name;
+            }
         }
     }
 
@@ -1746,11 +1830,32 @@ impl App {
         detail: impl Into<String>,
         tone: Tone,
     ) {
+        self.push_timeline_inner(actor, detail, tone, None);
+    }
+
+    pub(super) fn push_timeline_with_tool(
+        &mut self,
+        actor: impl Into<String>,
+        detail: impl Into<String>,
+        tone: Tone,
+        tool_record_index: usize,
+    ) {
+        self.push_timeline_inner(actor, detail, tone, Some(tool_record_index));
+    }
+
+    fn push_timeline_inner(
+        &mut self,
+        actor: impl Into<String>,
+        detail: impl Into<String>,
+        tone: Tone,
+        tool_record_index: Option<usize>,
+    ) {
         self.timeline.push_back(TimelineEntry {
             timestamp: utc_hms(),
             actor: actor.into(),
             detail: detail.into(),
             tone,
+            tool_record_index,
         });
         while self.timeline.len() > TIMELINE_LIMIT {
             self.timeline.pop_front();
@@ -1758,6 +1863,60 @@ impl App {
         if matches!(self.ui_mode, UiMode::Compact) {
             self.panel_scrolls
                 .insert(PanelId::CompactStream, usize::MAX);
+        }
+    }
+
+    /// Toggle expansion of the timeline entry at the current scroll position in Focused(Events).
+    pub(super) fn toggle_event_expansion(&mut self) {
+        let scroll_offset = self.panel_scrolls.get(&PanelId::Events).copied().unwrap_or(0);
+
+        // We need to map the visual scroll offset to a timeline entry index.
+        // Because expanded entries add extra lines, we walk through all timeline entries
+        // counting rendered lines until we reach or pass the scroll offset.
+        let expanded = self.expanded_tool_indices.clone();
+        let mut visual_line = 0usize;
+        let mut target_entry_idx: Option<usize> = None;
+
+        for (idx, entry) in self.timeline.iter().enumerate() {
+            let entry_start = visual_line;
+            visual_line += 1; // The main event line
+
+            // Count expanded content lines
+            if let Some(tool_idx) = entry.tool_record_index {
+                if expanded.contains(&tool_idx) {
+                    if let Some(record) = self.recent_tools.get(tool_idx) {
+                        if let Some(ref content) = record.content {
+                            let content_lines = content.lines().count().min(50);
+                            visual_line += content_lines;
+                            if content.lines().count() > 50 {
+                                visual_line += 1; // "... N more lines"
+                            }
+                        }
+                    }
+                }
+            }
+
+            if scroll_offset >= entry_start && scroll_offset < visual_line {
+                target_entry_idx = Some(idx);
+                break;
+            }
+        }
+
+        // If scroll is past all entries, target the last one
+        if target_entry_idx.is_none() && !self.timeline.is_empty() {
+            target_entry_idx = Some(self.timeline.len() - 1);
+        }
+
+        if let Some(entry_idx) = target_entry_idx {
+            if let Some(entry) = self.timeline.get(entry_idx) {
+                if let Some(tool_idx) = entry.tool_record_index {
+                    if self.expanded_tool_indices.contains(&tool_idx) {
+                        self.expanded_tool_indices.remove(&tool_idx);
+                    } else {
+                        self.expanded_tool_indices.insert(tool_idx);
+                    }
+                }
+            }
         }
     }
 
@@ -2088,6 +2247,7 @@ impl App {
                 FocusPanel::Workspace => self.render_focused_workspace(frame, sections[1]),
                 FocusPanel::Worksets => self.render_focused_worksets(frame, sections[1]),
                 FocusPanel::FileChanges => self.render_focused_file_changes(frame, sections[1]),
+                FocusPanel::Stream => self.render_focused_stream(frame, sections[1]),
             }
             self.render_composer(frame, sections[2]);
             if self.help_visible {
@@ -2150,6 +2310,7 @@ impl App {
                 FocusPanel::Workspace => self.render_focused_workspace(frame, sections[1]),
                 FocusPanel::Worksets => self.render_focused_worksets(frame, sections[1]),
                 FocusPanel::FileChanges => self.render_focused_file_changes(frame, sections[1]),
+                FocusPanel::Stream => self.render_focused_stream(frame, sections[1]),
             }
         } else {
             self.render_compact_stream(frame, sections[1]);
@@ -2180,11 +2341,40 @@ impl App {
 
     pub(super) fn render_focused_events(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         let width = inner_width(area);
-        let mut lines: Vec<Line<'static>> = self
-            .timeline
-            .iter()
-            .map(|entry| render_event_line(entry, width))
-            .collect();
+        let expanded = self.expanded_tool_indices.clone();
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        for entry in self.timeline.iter() {
+            lines.push(render_event_line(entry, width));
+            // If this timeline entry has a tool_record_index and is expanded, show content
+            if let Some(tool_idx) = entry.tool_record_index {
+                if expanded.contains(&tool_idx) {
+                    if let Some(record) = self.recent_tools.get(tool_idx) {
+                        if let Some(ref content) = record.content {
+                            let indent = "    ";
+                            for content_line in content.lines().take(50) {
+                                let display = format!(
+                                    "{}{}",
+                                    indent,
+                                    fit_text(content_line, width.saturating_sub(4))
+                                );
+                                lines.push(Line::from(Span::styled(
+                                    display,
+                                    Style::default().fg(Color::DarkGray),
+                                )));
+                            }
+                            if content.lines().count() > 50 {
+                                lines.push(Line::from(Span::styled(
+                                    format!("{}... ({} more lines)", indent, content.lines().count() - 50),
+                                    Style::default().fg(Color::DarkGray),
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "Waiting for activity.",
@@ -2197,6 +2387,308 @@ impl App {
             area,
             PanelId::Events,
             self.events_panel_title(),
+            lines,
+        );
+    }
+
+    pub(super) fn render_focused_stream(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        let width = inner_width(area);
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        for entry in self.stream_entries.iter() {
+            match entry {
+                StreamEntry::UserPrompt { text, timestamp } => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            fit_text(timestamp, 8),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            "YOU",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            fit_text(text, width.saturating_sub(14)),
+                            Style::default().fg(Color::White),
+                        ),
+                    ]));
+                }
+                StreamEntry::ModelTurn { iteration, timestamp } => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            fit_text(timestamp, 8),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            format!("MODEL turn {}", iteration),
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
+                StreamEntry::ToolCall { name, target, timestamp } => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            fit_text(timestamp, 8),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            "CALL",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            name.clone(),
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            fit_text(target, width.saturating_sub(22 + name.len())),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                }
+                StreamEntry::ToolResult {
+                    name,
+                    content,
+                    is_error,
+                    duration_ms,
+                    timestamp,
+                } => {
+                    let status_label = if *is_error { "ERR" } else { "OK" };
+                    let status_color = if *is_error { Color::Red } else { Color::Green };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            fit_text(timestamp, 8),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            status_label,
+                            Style::default()
+                                .fg(status_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            name.clone(),
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::styled(
+                            format!(" ({}ms)", duration_ms),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                    // Show content lines (indented, dimmed)
+                    if let Some(ref text) = content {
+                        let indent = "    ";
+                        for content_line in text.lines().take(20) {
+                            let display = format!(
+                                "{}{}",
+                                indent,
+                                fit_text(content_line, width.saturating_sub(4))
+                            );
+                            lines.push(Line::from(Span::styled(
+                                display,
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        }
+                        let total_lines = text.lines().count();
+                        if total_lines > 20 {
+                            lines.push(Line::from(Span::styled(
+                                format!("{}... ({} more lines)", indent, total_lines - 20),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        }
+                    }
+                }
+                StreamEntry::ThreadStarted { name, action, timestamp } => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            fit_text(timestamp, 8),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            "THREAD+",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            name.clone(),
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" • ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            fit_text(action, width.saturating_sub(22 + name.len())),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                }
+                StreamEntry::ThreadFinished { name, exit_code, timestamp } => {
+                    let tone = if *exit_code == 0 { Color::Green } else { Color::Yellow };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            fit_text(timestamp, 8),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            "THREAD-",
+                            Style::default().fg(tone).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            name.clone(),
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::styled(
+                            format!(" exit {}", exit_code),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                }
+                StreamEntry::AssistantText { text, thread_name, timestamp } => {
+                    let label = match thread_name {
+                        Some(tn) => format!("REPLY/{}", tn),
+                        None => "REPLY".to_string(),
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            fit_text(timestamp, 8),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            label.clone(),
+                            Style::default()
+                                .fg(Color::Blue)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    // Show assistant text content (indented)
+                    let indent = "    ";
+                    for content_line in text.lines().take(30) {
+                        let display = format!(
+                            "{}{}",
+                            indent,
+                            fit_text(content_line, width.saturating_sub(4))
+                        );
+                        lines.push(Line::from(Span::styled(
+                            display,
+                            Style::default().fg(Color::Gray),
+                        )));
+                    }
+                    let total_lines = text.lines().count();
+                    if total_lines > 30 {
+                        lines.push(Line::from(Span::styled(
+                            format!("{}... ({} more lines)", indent, total_lines - 30),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+                StreamEntry::StreamingDelta { text, thread_name, timestamp } => {
+                    let label = match thread_name {
+                        Some(tn) => format!("STREAM/{}", tn),
+                        None => "STREAM".to_string(),
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            fit_text(timestamp, 8),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(
+                            label,
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    let indent = "    ";
+                    for content_line in text.lines().take(40) {
+                        let display = format!(
+                            "{}{}",
+                            indent,
+                            fit_text(content_line, width.saturating_sub(4))
+                        );
+                        lines.push(Line::from(Span::styled(
+                            display,
+                            Style::default().fg(Color::White),
+                        )));
+                    }
+                    let total_lines = text.lines().count();
+                    if total_lines > 40 {
+                        lines.push(Line::from(Span::styled(
+                            format!("{}... ({} more lines)", indent, total_lines - 40),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Show live streaming text at the bottom if there's ongoing streaming
+        if !self.streaming_text.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "--- streaming ---",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            )));
+            let indent = "    ";
+            let streaming_lines: Vec<&str> = self.streaming_text.lines().collect();
+            let start = streaming_lines.len().saturating_sub(20);
+            for content_line in &streaming_lines[start..] {
+                let display = format!(
+                    "{}{}",
+                    indent,
+                    fit_text(content_line, width.saturating_sub(4))
+                );
+                lines.push(Line::from(Span::styled(
+                    display,
+                    Style::default().fg(Color::White),
+                )));
+            }
+            if start > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("{}({} earlier lines hidden)", indent, start),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Stream is empty. Activity will appear here.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        self.render_scrollable_lines_panel_with_title(
+            frame,
+            area,
+            PanelId::Stream,
+            Line::from(vec![
+                Span::styled(" Stream ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" ({} entries) ", self.stream_entries.len()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
             lines,
         );
     }
@@ -3131,6 +3623,22 @@ impl App {
         let displayed_index = self.displayed_response_index();
         let lines = match displayed_index {
             Some(index) => self.rendered_response_lines(index, available_width),
+            None if self.result_rx.is_some() && !self.streaming_text.is_empty() => {
+                // Show live streaming text while awaiting full response
+                let mut streaming_lines: Vec<Line<'static>> = Vec::new();
+                streaming_lines.push(Line::from(Span::styled(
+                    "Streaming response...",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )));
+                streaming_lines.push(Line::from(""));
+                for content_line in self.streaming_text.lines() {
+                    streaming_lines.push(Line::from(Span::styled(
+                        fit_text(content_line, available_width),
+                        Style::default().fg(Color::White),
+                    )));
+                }
+                streaming_lines
+            }
             None if self.result_rx.is_some() => vec![Line::from(Span::styled(
                 "Awaiting orchestrator reply.",
                 Style::default().fg(Color::DarkGray),
