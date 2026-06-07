@@ -175,8 +175,14 @@ impl App {
     }
 
     pub(super) fn show_composer_notice(&mut self, text: impl Into<String>, tone: Tone) {
+        let text = text.into();
+        match tone {
+            Tone::Error => tracing::error!(notice = %text, "tui error notice"),
+            Tone::Warning => tracing::warn!(notice = %text, "tui warning notice"),
+            _ => {}
+        }
         self.composer_notice = Some(ComposerNotice {
-            text: text.into(),
+            text,
             tone,
             expires_at: Instant::now() + Duration::from_secs(2),
         });
@@ -1379,6 +1385,7 @@ impl App {
     }
 
     pub(super) fn note_send_error(&mut self, error: String) {
+        tracing::error!(error = %error, "agent send failed");
         self.push_timeline("send", format!("error • {error}"), Tone::Error);
     }
 
@@ -1628,6 +1635,11 @@ impl App {
                 thread_name,
                 message,
             } => {
+                tracing::error!(
+                    thread_name = ?thread_name,
+                    error = %message,
+                    "agent event error"
+                );
                 let actor = thread_name.unwrap_or_else(|| "run".to_string());
                 self.push_timeline(actor, format!("error • {message}"), Tone::Error);
             }

@@ -331,7 +331,10 @@ pub async fn run(
                     match app.result_rx.as_mut() {
                         Some(rx) => match rx.await {
                             Ok(val) => Some(val),
-                            Err(_) => Some(Err("Internal error: agent task terminated unexpectedly".to_string())),
+                            Err(_) => {
+                                tracing::error!("agent task terminated unexpectedly (oneshot sender dropped)");
+                                Some(Err("Internal error: agent task terminated unexpectedly".to_string()))
+                            }
                         },
                         None => std::future::pending::<Option<Result<String, String>>>().await,
                     }
