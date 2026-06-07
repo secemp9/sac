@@ -22,6 +22,13 @@ pub(super) fn panel_is_selectable(panel: PanelId) -> bool {
             | PanelId::Workspace
             | PanelId::FileChanges
             | PanelId::CompactStream
+            | PanelId::ThreadEpisodes
+            | PanelId::Events
+            | PanelId::Threads
+            | PanelId::ThreadList
+            | PanelId::Tools
+            | PanelId::Terminals
+            | PanelId::Worksets
     )
 }
 

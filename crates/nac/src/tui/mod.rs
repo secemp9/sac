@@ -140,6 +140,7 @@ fn next_queued_input_event(
 enum SlashCommand {
     Exit,
     Sessions,
+    Copy,
     Plan { instruction: String },
     Run { workset_id: String },
     Goal { subcommand: GoalSubcommand },
@@ -203,7 +204,11 @@ pub async fn run(
 
     let keyboard_enhancements_enabled = enable_keyboard_enhancements(&mut terminal);
     let bracketed_paste_enabled = enable_bracketed_paste(&mut terminal);
-    let mouse_capture_enabled = enable_mouse_capture(&mut terminal);
+    let mouse_capture_enabled = if std::env::var_os("NAC_DISABLE_MOUSE").is_some() {
+        false
+    } else {
+        enable_mouse_capture(&mut terminal)
+    };
     tracing::debug!(
         keyboard_enhancements_enabled,
         bracketed_paste_enabled,

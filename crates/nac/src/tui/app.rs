@@ -197,6 +197,7 @@ impl App {
 
         // Built-in commands
         for (name, desc) in [
+            ("copy", "Copy last response to clipboard"),
             ("exit", "Quit nac"),
             ("sessions", "Open session picker"),
             ("plan", "Create a workset plan"),
@@ -426,9 +427,21 @@ impl App {
                 code: KeyCode::Char('c'),
                 modifiers,
                 ..
-            } if modifiers.contains(KeyModifiers::CONTROL) => {
+            } if modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::SHIFT) =>
+            {
                 self.quit = true;
                 AppAction::Quit
+            }
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL)
+                && modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.copy_selection_to_clipboard();
+                AppAction::None
             }
             KeyEvent {
                 code: KeyCode::Char('?'),
@@ -642,6 +655,12 @@ impl App {
                         Ok(SlashCommand::Sessions) => {
                             tracing::info!(command = "/sessions", "slash command accepted");
                             self.open_session_picker(false);
+                            self.clear_composer();
+                            return AppAction::None;
+                        }
+                        Ok(SlashCommand::Copy) => {
+                            tracing::info!(command = "/copy", "slash command accepted");
+                            self.copy_last_response_to_clipboard();
                             self.clear_composer();
                             return AppAction::None;
                         }
@@ -4053,8 +4072,28 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if let Some(ref mut clipboard) = self.clipboard {
-            let _ = copy_text_to_clipboard(clipboard, &text);
+        let _ = copy_text_to_clipboard(&mut self.clipboard, &text);
+    }
+
+    pub(super) fn copy_last_response_to_clipboard(&mut self) {
+        let Some(response) = self.responses.last() else {
+            self.show_composer_notice("no response to copy", Tone::Warning);
+            return;
+        };
+        let text = response.content.clone();
+        match copy_text_to_clipboard(&mut self.clipboard, &text) {
+            Ok(()) => {
+                self.show_composer_notice(
+                    format!("copied {} chars to clipboard", text.len()),
+                    Tone::Success,
+                );
+            }
+            Err(e) => {
+                self.show_composer_notice(
+                    format!("copy failed: {e}"),
+                    Tone::Error,
+                );
+            }
         }
     }
 

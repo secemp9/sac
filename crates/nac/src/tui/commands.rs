@@ -27,6 +27,7 @@ pub(super) fn parse_slash_command(prompt: &str) -> Option<Result<SlashCommand, S
     Some(match name {
         "exit" if args.is_empty() => Ok(SlashCommand::Exit),
         "sessions" if args.is_empty() => Ok(SlashCommand::Sessions),
+        "copy" if args.is_empty() => Ok(SlashCommand::Copy),
         "plan" => parse_workset_slash_command("plan", "instruction", args, |instruction| {
             SlashCommand::Plan { instruction }
         }),

@@ -75,10 +75,33 @@ pub(super) fn contains_point(area: Rect, column: u16, row: u16) -> bool {
 }
 
 pub(super) fn copy_text_to_clipboard(
-    clipboard: &mut arboard::Clipboard,
+    clipboard: &mut Option<arboard::Clipboard>,
     text: &str,
 ) -> io::Result<()> {
-    clipboard
-        .set_text(text)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    // Try native clipboard first
+    if let Some(ref mut cb) = clipboard {
+        if cb.set_text(text).is_ok() {
+            return Ok(());
+        }
+    }
+    // Fallback: OSC 52 (works over SSH, tmux, etc.)
+    write_osc52(text)
+}
+
+fn write_osc52(text: &str) -> io::Result<()> {
+    use base64::Engine;
+    use std::io::Write;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let in_tmux = std::env::var_os("TMUX").is_some();
+
+    let sequence = if in_tmux {
+        format!("\x1bPtmux;\x1b\x1b]52;c;{encoded}\x07\x1b\\")
+    } else {
+        format!("\x1b]52;c;{encoded}\x07")
+    };
+
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(sequence.as_bytes())?;
+    stdout.flush()
 }
