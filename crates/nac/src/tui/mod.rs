@@ -235,12 +235,17 @@ pub async fn run(
             )
         })
         .unwrap_or_default();
+    let timeline_json_for_restore = session_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.timeline_json.as_deref())
+        .map(|s| s.to_string());
     let mut app = App::new_with_mode(
         metadata,
         &restored_messages,
         start_in_session_picker,
         ui_mode,
     );
+    app.hydrate_timeline(timeline_json_for_restore.as_deref());
     app.restore_response_duration_history(
         response_duration_history.as_deref(),
         last_response_duration,
@@ -348,12 +353,16 @@ pub async fn run(
                             let (last_response_duration_ms, previous_response_duration_ms) =
                                 app.response_duration_snapshot_ms();
                             let response_durations_ms = app.response_duration_history_snapshot_ms();
+                            let timeline_json = serde_json::to_string(
+                                &app.timeline.iter().collect::<Vec<_>>()
+                            ).ok();
                             persist_session_snapshot(
                                 snapshot,
                                 &agent,
                                 last_response_duration_ms,
                                 previous_response_duration_ms,
                                 response_durations_ms,
+                                timeline_json,
                             )
                             .await?;
                         }

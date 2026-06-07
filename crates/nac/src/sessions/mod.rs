@@ -33,6 +33,7 @@ pub struct SessionSnapshot {
     pub last_response_duration_ms: Option<u64>,
     pub previous_response_duration_ms: Option<u64>,
     pub response_durations_ms: Option<Vec<Option<u64>>>,
+    pub timeline_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

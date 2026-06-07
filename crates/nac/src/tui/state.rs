@@ -1,7 +1,8 @@
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Tone {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Tone {
     Info,
     Success,
     Warning,
@@ -97,12 +98,12 @@ pub(super) struct ResponseEntry {
     pub(super) duration: Option<Duration>,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct TimelineEntry {
-    pub(super) timestamp: String,
-    pub(super) actor: String,
-    pub(super) detail: String,
-    pub(super) tone: Tone,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TimelineEntry {
+    pub(crate) timestamp: String,
+    pub(crate) actor: String,
+    pub(crate) detail: String,
+    pub(crate) tone: Tone,
 }
 
 #[derive(Debug, Clone)]

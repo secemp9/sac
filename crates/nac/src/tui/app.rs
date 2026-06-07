@@ -843,6 +843,32 @@ impl App {
         }
     }
 
+    pub(super) fn hydrate_timeline(&mut self, timeline_json: Option<&str>) {
+        let Some(json) = timeline_json else {
+            return;
+        };
+        match serde_json::from_str::<Vec<TimelineEntry>>(json) {
+            Ok(entries) => {
+                // Prepend restored entries before any entries already in the
+                // timeline (e.g. the "restored N message(s)" notice pushed
+                // during construction).
+                let existing: Vec<TimelineEntry> = self.timeline.drain(..).collect();
+                for entry in entries {
+                    self.timeline.push_back(entry);
+                }
+                for entry in existing {
+                    self.timeline.push_back(entry);
+                }
+                while self.timeline.len() > TIMELINE_LIMIT {
+                    self.timeline.pop_front();
+                }
+            }
+            Err(err) => {
+                tracing::warn!("failed to restore timeline from session: {err}");
+            }
+        }
+    }
+
     pub(super) fn restore_response_duration_history(
         &mut self,
         response_durations: Option<&[Option<Duration>]>,

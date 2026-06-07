@@ -113,6 +113,7 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
         "INTEGER",
     )?;
     ensure_column(&conn, "sessions", "response_durations_ms_json", "TEXT")?;
+    ensure_column(&conn, "sessions", "timeline_json", "TEXT")?;
     tracing::trace!(db_path = %path.display(), "SQLite store connection ready");
     Ok(conn)
 }
