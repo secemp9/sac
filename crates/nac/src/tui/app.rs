@@ -47,6 +47,8 @@ pub(super) struct App {
     pub(super) goal_pause_requested: bool,
     pub(super) goal_clear_requested: bool,
     pub(super) slash_popup: Option<SlashPopup>,
+    pub(super) history_index: Option<usize>,
+    pub(super) history_draft: Option<String>,
 }
 
 impl App {
@@ -138,6 +140,8 @@ impl App {
             goal_pause_requested: false,
             goal_clear_requested: false,
             slash_popup: None,
+            history_index: None,
+            history_draft: None,
         };
 
         app.init_slash_popup();
@@ -172,6 +176,56 @@ impl App {
 
     pub(super) fn clear_composer_notice(&mut self) {
         self.composer_notice = None;
+    }
+
+    pub(super) fn navigate_history_up(&mut self) {
+        if self.prompts.is_empty() {
+            return;
+        }
+        match self.history_index {
+            None => {
+                // Entering history mode: save current draft
+                self.history_draft = Some(self.prompt());
+                let idx = self.prompts.len() - 1;
+                self.history_index = Some(idx);
+                self.load_history_entry(idx);
+            }
+            Some(idx) if idx > 0 => {
+                let new_idx = idx - 1;
+                self.history_index = Some(new_idx);
+                self.load_history_entry(new_idx);
+            }
+            Some(_) => {
+                // Already at oldest, do nothing
+            }
+        }
+    }
+
+    pub(super) fn navigate_history_down(&mut self) {
+        let Some(idx) = self.history_index else {
+            return;
+        };
+        let new_idx = idx + 1;
+        if new_idx >= self.prompts.len() {
+            // Past newest: restore draft
+            let draft = self.history_draft.take().unwrap_or_default();
+            self.history_index = None;
+            self.composer = build_composer();
+            if !draft.is_empty() {
+                self.composer.insert_str(&draft);
+            }
+        } else {
+            self.history_index = Some(new_idx);
+            self.load_history_entry(new_idx);
+        }
+    }
+
+    fn load_history_entry(&mut self, idx: usize) {
+        if let Some(text) = self.prompts.get(idx) {
+            let text = text.clone();
+            self.composer = build_composer();
+            self.composer.insert_str(&text);
+        }
     }
 
     pub(super) fn show_composer_notice(&mut self, text: impl Into<String>, tone: Tone) {
@@ -757,6 +811,37 @@ impl App {
             }
             // All other SUPER-modified keys: don't type into composer
             KeyEvent { modifiers, .. } if modifiers.contains(KeyModifiers::SUPER) => {
+                AppAction::None
+            }
+            // Prompt history: Up arrow cycles to older prompts
+            KeyEvent {
+                code: KeyCode::Up,
+                modifiers,
+                ..
+            } if !modifiers.intersects(
+                KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+            ) && self.result_rx.is_none()
+                && !matches!(self.screen, ScreenMode::Focused(FocusPanel::Threads))
+                && self.composer.cursor().0 == 0
+                && (self.prompt().trim().is_empty() || self.history_index.is_some())
+                && !self.prompts.is_empty() =>
+            {
+                self.navigate_history_up();
+                AppAction::None
+            }
+            // Prompt history: Down arrow cycles to newer prompts
+            KeyEvent {
+                code: KeyCode::Down,
+                modifiers,
+                ..
+            } if !modifiers.intersects(
+                KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+            ) && self.result_rx.is_none()
+                && self.history_index.is_some()
+                && self.composer.cursor().0
+                    >= self.composer.lines().len().saturating_sub(1) =>
+            {
+                self.navigate_history_down();
                 AppAction::None
             }
             _ => {
@@ -1373,6 +1458,8 @@ impl App {
     }
 
     pub(super) fn note_prompt_submitted(&mut self, prompt: &str) {
+        self.history_index = None;
+        self.history_draft = None;
         self.prompts.push(prompt.to_string());
         self.select_latest_prompt();
         self.panel_scrolls
