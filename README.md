@@ -1,77 +1,59 @@
-# nac
+# sac
 
-Small coding agent.
-Heavily inspired by [slate](https://randomlabs.ai/blog/slate). Also takes inspiration from [nanocode](https://github.com/1rgs/nanocode) and [pi](https://github.com/badlogic/pi-mono).
+A modified fork of [nac](https://github.com/arcee-ai/nac) — a small coding agent with a terminal UI.
 
-Install the latest `edge` build:
+## What's different
+
+This fork adds:
+
+- **Stream panel** — live model response streaming with expandable events
+- **Slash commands** with autocompletion popup and a goal system
+- **Prompt history** — Up/Down arrow cycling in the composer
+- **Session persistence** — timeline events are saved and restored on resume
+- **Improved copy/selection** across all panels
+- **Enriched tool descriptions** and file ops guidance in the worker system prompt
+- **Deep diagnostics logging** for TUI-visible errors
+- **ChatGPT Codex auth** backend (device-code flow)
+- **Compact TUI mode** (`--compact` / `--full`)
+- **TOML-backed runtime config**
+- **`nac upgrade`** command
+- **Podman sandbox** support
+- Various scrolling, rendering, and markdown fixes
+
+## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/sapiosaturn/nac/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/secemp9/sac/main/scripts/install.sh | sh
 ```
 
-Pinned version installs are not supported yet.
+## Usage
 
-Set `OPENAI_API_KEY`, then run `nac`. Use `nac --compact` for the compact single-column TUI, or `nac --full` to override a compact config default.
+Set `OPENAI_API_KEY`, then run `nac`.
 
-To use ChatGPT Codex auth instead of an OpenAI API key, run `nac codex-auth login` and complete the device-code flow in a browser. Launch with `nac --backend chatgpt-codex-responses`, or configure `backend = "chatgpt-codex-responses"` under `[model]`.
+```sh
+nac            # full TUI
+nac --compact  # single-column layout
+nac --full     # override a compact config default
+```
 
-Optional:
+For ChatGPT Codex auth instead of an API key:
+
+```sh
+nac codex-auth login
+nac --backend chatgpt-codex-responses
+```
+
+Optional env vars:
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
 
-Linux installs use the portable static build.
+## Config
 
-Upgrade to the latest `edge` build:
-
-```sh
-nac upgrade
-```
-
-`AGENTS.md` is loaded hierarchically from the project and globally from `NAC_HOME` / `~/.config/nac`. Skills are discovered from project and user skill directories and activated from workers with `activate_skill(...)`. Sessions are stored in the project store (`.nac/store.db` by default): use `nac resume` for the picker, `nac resume --last` for the newest session, or `nac resume SESSION_ID` for a specific session. Thread history does not auto-compact right now.
-
-Uninstall:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/sapiosaturn/nac/main/scripts/uninstall.sh | sh
-```
-
-`nac` can run tools inside a Podman sandbox (requires Podman to be installed):
-
-```sh
-nac --sandbox
-```
-
-By default this mounts the current directory into the sandbox at `/workspace`.
-
-For a custom setup:
-- `--no-mount-cwd` disables the default current-directory mount
-- `--mount HOST:GUEST` adds a read-write mount
-- `--mount-ro HOST:GUEST` adds a read-only mount
-- `--sandbox-image IMAGE` overrides the default image (`python:3.13-bookworm`)
-
-On macOS, start Podman first:
-
-```sh
-podman machine init
-podman machine start
-```
-
-## Recommended config
-
-Optional config lives at `~/.config/nac/config.toml`, or at `$NAC_HOME/config.toml` when `NAC_HOME` is set. Explicit CLI args and environment variables override TOML defaults. Resumed sessions continue using the model and sandbox settings stored in their session snapshot.
-
-The `api_key_env` setting names the environment variable to read when `OPENAI_API_KEY` is not set. Store paths remain relative to the launch working directory.
+Config lives at `~/.config/nac/config.toml` (or `$NAC_HOME/config.toml`). CLI args and env vars override TOML defaults.
 
 ```toml
-[agents_md]
-fallback_filenames = []
-max_bytes = 4194304
-
 [ui]
 mode = "full"
-
-[storage]
-store_path = ".nac/store.db"
 
 [model]
 backend = "openai-responses"
@@ -80,9 +62,6 @@ base_url = "https://api.openai.com/v1"
 reasoning_effort = "xhigh"
 api_key_env = "OPENAI_API_KEY"
 
-[sandbox]
-image = "python:3.13-bookworm"
-
 [worker]
 thread_timeout_secs = 3600
 
@@ -90,18 +69,42 @@ thread_timeout_secs = 3600
 enabled = true
 transport = "streamable_http"
 url = "https://mcp.exa.ai/mcp"
-
-[mcp_servers.context7]
-enabled = true
-transport = "streamable_http"
-url = "https://mcp.context7.com/mcp"
-
-[mcp_servers.grep_app]
-enabled = true
-transport = "streamable_http"
-url = "https://mcp.grep.app"
 ```
 
-Supported MCP transports right now are `stdio` and `streamable_http`. Stdio servers can provide `command`, `args`, and `env`; streamable HTTP servers provide `url` and optional `headers`. MCP string values support `${ENV_VAR}` expansion.
+Supported MCP transports: `stdio` and `streamable_http`. String values support `${ENV_VAR}` expansion.
 
-For ChatGPT Codex auth, the default base URL is `https://chatgpt.com/backend-api`; NAC sends non-streaming Responses requests to `/codex/responses`. Use `nac codex-auth status` to inspect the saved account and `nac codex-auth logout` to remove local tokens.
+## Sessions
+
+`AGENTS.md` is loaded hierarchically from the project and globally from `NAC_HOME` / `~/.config/nac`. Sessions are stored in `.nac/store.db` by default.
+
+```sh
+nac resume            # session picker
+nac resume --last     # most recent session
+nac resume SESSION_ID # specific session
+```
+
+## Sandbox
+
+Run tools inside a Podman sandbox:
+
+```sh
+nac --sandbox
+```
+
+Options:
+- `--no-mount-cwd` — skip default CWD mount
+- `--mount HOST:GUEST` — read-write mount
+- `--mount-ro HOST:GUEST` — read-only mount
+- `--sandbox-image IMAGE` — override default image
+
+## Upgrade
+
+```sh
+nac upgrade
+```
+
+## Uninstall
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/secemp9/sac/main/scripts/uninstall.sh | sh
+```
