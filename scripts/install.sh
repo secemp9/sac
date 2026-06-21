@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${NAC_REPO:-sapiosaturn/nac}"
+REPO="${NAC_REPO:-secemp9/sac}"
 CHANNEL="${NAC_CHANNEL:-edge}"
 BASE_URL="${NAC_BASE_URL:-https://github.com/${REPO}/releases/download}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
@@ -53,6 +53,13 @@ download() {
     exit 1
   fi
 }
+
+if command -v nac >/dev/null 2>&1; then
+  existing="$(command -v nac)"
+  echo "nac is already installed at $existing"
+  echo "run 'nac upgrade' to update, or set INSTALL_DIR to install elsewhere"
+  exit 0
+fi
 
 target="$(detect_target)"
 asset="nac-${target}.tar.gz"
