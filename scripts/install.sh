@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-REPO="${NAC_REPO:-secemp9/sac}"
-CHANNEL="${NAC_CHANNEL:-edge}"
-BASE_URL="${NAC_BASE_URL:-https://github.com/${REPO}/releases/download}"
+REPO="${SAC_REPO:-secemp9/sac}"
+CHANNEL="${SAC_CHANNEL:-edge}"
+BASE_URL="${SAC_BASE_URL:-https://github.com/${REPO}/releases/download}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 detect_target() {
@@ -49,20 +49,20 @@ download() {
   elif command -v wget >/dev/null 2>&1; then
     wget -qO "$output" "$url"
   else
-    echo "need curl or wget to install nac" >&2
+    echo "need curl or wget to install sac" >&2
     exit 1
   fi
 }
 
-if command -v nac >/dev/null 2>&1; then
-  existing="$(command -v nac)"
-  echo "nac is already installed at $existing"
-  echo "run 'nac upgrade' to update, or set INSTALL_DIR to install elsewhere"
+if command -v sac >/dev/null 2>&1; then
+  existing="$(command -v sac)"
+  echo "sac is already installed at $existing"
+  echo "run 'sac upgrade' to update, or set INSTALL_DIR to install elsewhere"
   exit 0
 fi
 
 target="$(detect_target)"
-asset="nac-${target}.tar.gz"
+asset="sac-${target}.tar.gz"
 url="${BASE_URL}/${CHANNEL}/${asset}"
 
 tmpdir="$(mktemp -d)"
@@ -73,14 +73,14 @@ download "$url" "$archive"
 
 mkdir -p "$INSTALL_DIR"
 tar -xzf "$archive" -C "$tmpdir"
-install -m 755 "$tmpdir/nac" "$INSTALL_DIR/nac"
+install -m 755 "$tmpdir/sac" "$INSTALL_DIR/sac"
 
-echo "installed nac to $INSTALL_DIR/nac"
+echo "installed sac to $INSTALL_DIR/sac"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*)
     ;;
   *)
-    echo "add $INSTALL_DIR to your PATH to run nac directly"
+    echo "add $INSTALL_DIR to your PATH to run sac directly"
     ;;
 esac
