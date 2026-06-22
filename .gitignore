@@ -3,4 +3,9 @@
 images/nac
 nac.db
 .nac/
+.sac/
 .dots/
+.thoughts/
+.thoughts-data/
+.tldr/
+.tldrignore
