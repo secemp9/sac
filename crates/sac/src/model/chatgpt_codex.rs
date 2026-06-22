@@ -1,12 +1,16 @@
 use super::*;
 use anyhow::Context;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use reqwest::header;
 use reqwest::StatusCode;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,12 +20,18 @@ const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/
 const DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const REVOKE_TOKEN_URL: &str = "https://auth.openai.com/oauth/revoke";
+const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
-const ORIGINATOR: &str = "sac";
+const ORIGINATOR: &str = "codex_cli_rs";
 const AUTH_TYPE: &str = "chatgpt-codex";
 const DEFAULT_EXPIRES_IN_SECS: u64 = 3600;
-const REFRESH_SKEW_MS: u64 = 60_000;
+const REFRESH_SKEW_MS: u64 = 300_000;
 const DEVICE_TIMEOUT_SECS: u64 = 15 * 60;
+const OAUTH_SCOPE: &str = "openid profile email offline_access";
+const DEFAULT_SERVER_PORT: u16 = 1455;
+const FALLBACK_SERVER_PORT: u16 = 1457;
+const REVOKE_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredCodexAuth {
@@ -68,7 +78,172 @@ impl fmt::Display for CodexRequestError {
 
 impl std::error::Error for CodexRequestError {}
 
-pub async fn codex_auth_login() -> Result<()> {
+struct PkceCodes {
+    code_verifier: String,
+    code_challenge: String,
+}
+
+fn generate_pkce() -> PkceCodes {
+    use rand::RngExt;
+    let mut bytes = [0u8; 64];
+    rand::rng().fill(&mut bytes);
+    let code_verifier = URL_SAFE_NO_PAD.encode(bytes);
+    let digest = Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = URL_SAFE_NO_PAD.encode(digest);
+    PkceCodes {
+        code_verifier,
+        code_challenge,
+    }
+}
+
+fn generate_state() -> String {
+    use rand::RngExt;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn build_authorize_url(redirect_uri: &str, pkce: &PkceCodes, state: &str) -> String {
+    let params = [
+        ("response_type", "code"),
+        ("client_id", CLIENT_ID),
+        ("redirect_uri", redirect_uri),
+        ("scope", OAUTH_SCOPE),
+        ("code_challenge", &pkce.code_challenge),
+        ("code_challenge_method", "S256"),
+        ("id_token_add_organizations", "true"),
+        ("state", state),
+        ("originator", ORIGINATOR),
+    ];
+    let qs = params
+        .iter()
+        .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{AUTHORIZE_URL}?{qs}")
+}
+
+fn bind_server() -> Result<tiny_http::Server> {
+    tiny_http::Server::http(format!("127.0.0.1:{DEFAULT_SERVER_PORT}"))
+        .or_else(|_| tiny_http::Server::http(format!("127.0.0.1:{FALLBACK_SERVER_PORT}")))
+        .map_err(|e| anyhow!("failed to start local auth server: {e}"))
+}
+
+fn wait_for_callback(server: &Arc<tiny_http::Server>, expected_state: &str) -> Result<String> {
+    loop {
+        let request = server.recv().map_err(|e| anyhow!("server recv error: {e}"))?;
+        let url_str = format!("http://localhost{}", request.url());
+        let parsed = url::Url::parse(&url_str).context("failed to parse callback URL")?;
+
+        if !parsed.path().starts_with("/auth/callback") {
+            let response = tiny_http::Response::from_string("Not found")
+                .with_status_code(tiny_http::StatusCode(404));
+            let _ = request.respond(response);
+            continue;
+        }
+
+        let params: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
+
+        if let Some(error) = params.get("error") {
+            let desc = params
+                .get("error_description")
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let html = format!(
+                "<html><body><h2>Authentication failed</h2><p>{error}: {desc}</p></body></html>"
+            );
+            let response = tiny_http::Response::from_string(html)
+                .with_header("Content-Type: text/html".parse::<tiny_http::Header>().unwrap())
+                .with_status_code(tiny_http::StatusCode(400));
+            let _ = request.respond(response);
+            return Err(anyhow!("OAuth error: {error} - {desc}"));
+        }
+
+        let state = params
+            .get("state")
+            .ok_or_else(|| anyhow!("callback missing state parameter"))?;
+        if state.as_ref() != expected_state {
+            let response = tiny_http::Response::from_string("Invalid state")
+                .with_status_code(tiny_http::StatusCode(400));
+            let _ = request.respond(response);
+            continue;
+        }
+
+        let code = params
+            .get("code")
+            .ok_or_else(|| anyhow!("callback missing code parameter"))?
+            .to_string();
+
+        let html = "<html><body><h2>Authentication successful</h2><p>You can close this tab and return to the terminal.</p></body></html>";
+        let response = tiny_http::Response::from_string(html)
+            .with_header("Content-Type: text/html".parse::<tiny_http::Header>().unwrap());
+        let _ = request.respond(response);
+
+        return Ok(code);
+    }
+}
+
+async fn exchange_code_pkce(
+    client: &Client,
+    redirect_uri: &str,
+    pkce: &PkceCodes,
+    code: &str,
+) -> Result<TokenResponse> {
+    let response = client
+        .post(TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", CLIENT_ID),
+            ("code_verifier", pkce.code_verifier.as_str()),
+        ])
+        .send()
+        .await
+        .context("failed to exchange authorization code")?;
+
+    parse_token_response(response, "browser token exchange").await
+}
+
+async fn browser_login() -> Result<()> {
+    let pkce = generate_pkce();
+    let state = generate_state();
+    let server = Arc::new(bind_server()?);
+    let addr = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| anyhow!("unable to determine server port"))?;
+    let redirect_uri = format!("http://localhost:{}/auth/callback", addr.port());
+    let auth_url = build_authorize_url(&redirect_uri, &pkce, &state);
+
+    if let Err(e) = webbrowser::open(&auth_url) {
+        eprintln!("Failed to open browser: {e}");
+    }
+    eprintln!("If your browser did not open, navigate to:");
+    eprintln!("{auth_url}");
+    eprintln!();
+    eprintln!("Waiting for authentication...");
+
+    let server_clone = Arc::clone(&server);
+    let state_clone = state.clone();
+    let code =
+        tokio::task::spawn_blocking(move || wait_for_callback(&server_clone, &state_clone))
+            .await
+            .context("callback handler panicked")??;
+
+    let client = Client::new();
+    let tokens = exchange_code_pkce(&client, &redirect_uri, &pkce, &code).await?;
+    let auth = auth_from_token_response(tokens, None)?;
+    with_auth_lock(|| write_auth_file(&auth))?;
+
+    println!("Codex auth saved.");
+    println!("account: {}", auth.account_id);
+    println!("path: {}", auth_file_path()?.display());
+    Ok(())
+}
+
+async fn device_code_login() -> Result<()> {
     let client = Client::new();
     let device = request_device_code(&client).await?;
 
@@ -88,12 +263,67 @@ pub async fn codex_auth_login() -> Result<()> {
     println!("Codex auth saved.");
     println!("account: {}", auth.account_id);
     println!("path: {}", auth_file_path()?.display());
-
     Ok(())
 }
 
-pub fn codex_auth_logout() -> Result<()> {
+pub async fn codex_auth_login(headless: bool) -> Result<()> {
+    if headless {
+        return device_code_login().await;
+    }
+    match browser_login().await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("Browser login failed: {e}");
+            eprintln!("Falling back to device code flow...");
+            device_code_login().await
+        }
+    }
+}
+
+async fn revoke_token(client: &Client, token: &str, token_type_hint: &str) -> Result<()> {
+    let mut body = json!({
+        "token": token,
+        "token_type_hint": token_type_hint,
+    });
+    if token_type_hint == "refresh_token" {
+        body["client_id"] = Value::String(CLIENT_ID.to_string());
+    }
+
+    let result = client
+        .post(REVOKE_TOKEN_URL)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", codex_user_agent())
+        .timeout(std::time::Duration::from_secs(REVOKE_TIMEOUT_SECS))
+        .json(&body)
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!("token revoked successfully");
+            Ok(())
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!("token revocation returned HTTP {}: {}", status, truncate(&text));
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!("token revocation request failed: {e}");
+            Ok(())
+        }
+    }
+}
+
+pub async fn codex_auth_logout() -> Result<()> {
     let path = auth_file_path()?;
+    let client = Client::new();
+
+    if let Ok(Some(auth)) = with_auth_lock(|| read_auth_file_optional()) {
+        let _ = revoke_token(&client, &auth.refresh, "refresh_token").await;
+    }
+
     let removed = with_auth_lock(|| match fs::remove_file(&path) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -324,12 +554,13 @@ async fn exchange_authorization_code(
 async fn refresh_access_token(client: &Client, refresh_token: &str) -> Result<TokenResponse> {
     let response = client
         .post(TOKEN_URL)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", CLIENT_ID),
-        ])
+        .header("Content-Type", "application/json")
+        .header("User-Agent", codex_user_agent())
+        .json(&json!({
+            "client_id": CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }))
         .send()
         .await
         .context("failed to refresh Codex access token")?;

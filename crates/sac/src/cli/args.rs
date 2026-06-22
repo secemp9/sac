@@ -207,8 +207,12 @@ pub(super) struct CodexAuthCli {
 
 #[derive(Subcommand)]
 pub(super) enum CodexAuthCommand {
-    /// Sign in with ChatGPT using device code authorization
-    Login,
+    /// Sign in with ChatGPT (opens browser; use --headless for device code flow)
+    Login {
+        /// Use device code flow instead of browser login (for SSH/headless environments)
+        #[arg(long)]
+        headless: bool,
+    },
     /// Show stored Codex auth status
     Status,
     /// Remove stored Codex auth

@@ -382,9 +382,9 @@ fn run_config_cli(cli: ConfigCli) -> Result<()> {
 
 async fn run_codex_auth_cli(cli: CodexAuthCli) -> Result<()> {
     match cli.command {
-        Some(CodexAuthCommand::Login) => codex_auth_login().await,
+        Some(CodexAuthCommand::Login { headless }) => codex_auth_login(headless).await,
         Some(CodexAuthCommand::Status) => codex_auth_status(),
-        Some(CodexAuthCommand::Logout) => codex_auth_logout(),
+        Some(CodexAuthCommand::Logout) => codex_auth_logout().await,
         None => {
             let mut command = CodexAuthCli::command();
             command.print_help()?;
