@@ -45,20 +45,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build nac
-        run: cargo build --release --locked -p nac --target ${{ matrix.target }}
+      - name: Build sac
+        run: cargo build --release --locked -p sac --target ${{ matrix.target }}
 
       - name: Package archive
         run: |
           mkdir -p dist
-          tar -czf "dist/nac-${{ matrix.target }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" nac
+          tar -czf "dist/sac-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" sac
 
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
-          name: nac-${{ matrix.target }}
-          path: dist/nac-${{ matrix.target }}.tar.gz
+          name: sac-${{ matrix.target }}
+          path: dist/sac-${{ matrix.target }}.tar.gz
 
   publish:
     needs: build
@@ -73,7 +73,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: nac-*
+          pattern: sac-*
           merge-multiple: true
 
       - name: Publish edge release
@@ -91,7 +91,7 @@ jobs:
           else
             gh release create edge dist/* \
               --title edge \
-              --notes "Latest main build of nac." \
+              --notes "Latest main build of sac." \
               --prerelease \
               --target "$GITHUB_SHA"
           fi

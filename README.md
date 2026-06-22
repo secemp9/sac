@@ -16,7 +16,7 @@ This fork adds:
 - **ChatGPT Codex auth** backend (device-code flow)
 - **Compact TUI mode** (`--compact` / `--full`)
 - **TOML-backed runtime config**
-- **`nac upgrade`** command
+- **`sac upgrade`** command
 - **Podman sandbox** support
 - Various scrolling, rendering, and markdown fixes
 
@@ -28,19 +28,19 @@ curl -fsSL https://raw.githubusercontent.com/secemp9/sac/main/scripts/install.sh
 
 ## Usage
 
-Set `OPENAI_API_KEY`, then run `nac`.
+Set `OPENAI_API_KEY`, then run `sac`.
 
 ```sh
-nac            # full TUI
-nac --compact  # single-column layout
-nac --full     # override a compact config default
+sac            # full TUI
+sac --compact  # single-column layout
+sac --full     # override a compact config default
 ```
 
 For ChatGPT Codex auth instead of an API key:
 
 ```sh
-nac codex-auth login
-nac --backend chatgpt-codex-responses
+sac codex-auth login
+sac --backend chatgpt-codex-responses
 ```
 
 Optional env vars:
@@ -49,7 +49,7 @@ Optional env vars:
 
 ## Config
 
-Config lives at `~/.config/nac/config.toml` (or `$NAC_HOME/config.toml`). CLI args and env vars override TOML defaults.
+Config lives at `~/.config/sac/config.toml` (or `$SAC_HOME/config.toml`). CLI args and env vars override TOML defaults.
 
 ```toml
 [ui]
@@ -75,12 +75,12 @@ Supported MCP transports: `stdio` and `streamable_http`. String values support `
 
 ## Sessions
 
-`AGENTS.md` is loaded hierarchically from the project and globally from `NAC_HOME` / `~/.config/nac`. Sessions are stored in `.nac/store.db` by default.
+`AGENTS.md` is loaded hierarchically from the project and globally from `SAC_HOME` / `~/.config/sac`. Sessions are stored in `.sac/store.db` by default.
 
 ```sh
-nac resume            # session picker
-nac resume --last     # most recent session
-nac resume SESSION_ID # specific session
+sac resume            # session picker
+sac resume --last     # most recent session
+sac resume SESSION_ID # specific session
 ```
 
 ## Sandbox
@@ -88,7 +88,7 @@ nac resume SESSION_ID # specific session
 Run tools inside a Podman sandbox:
 
 ```sh
-nac --sandbox
+sac --sandbox
 ```
 
 Options:
@@ -100,7 +100,7 @@ Options:
 ## Upgrade
 
 ```sh
-nac upgrade
+sac upgrade
 ```
 
 ## Uninstall
