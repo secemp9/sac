@@ -28,7 +28,7 @@ const AUTH_TYPE: &str = "chatgpt-codex";
 const DEFAULT_EXPIRES_IN_SECS: u64 = 3600;
 const REFRESH_SKEW_MS: u64 = 300_000;
 const DEVICE_TIMEOUT_SECS: u64 = 15 * 60;
-const OAUTH_SCOPE: &str = "openid profile email offline_access";
+const OAUTH_SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const DEFAULT_SERVER_PORT: u16 = 1455;
 const FALLBACK_SERVER_PORT: u16 = 1457;
 const REVOKE_TIMEOUT_SECS: u64 = 10;
@@ -112,6 +112,7 @@ fn build_authorize_url(redirect_uri: &str, pkce: &PkceCodes, state: &str) -> Str
         ("code_challenge", &pkce.code_challenge),
         ("code_challenge_method", "S256"),
         ("id_token_add_organizations", "true"),
+        ("codex_cli_simplified_flow", "true"),
         ("state", state),
         ("originator", ORIGINATOR),
     ];
@@ -1011,7 +1012,7 @@ fn auth_file_path() -> Result<PathBuf> {
 }
 
 fn auth_lock_path() -> Result<PathBuf> {
-    Ok(auth_file_path()?.with_extension("auth.json.lock"))
+    Ok(auth_file_path()?.with_file_name("auth.json.lock"))
 }
 
 fn acquire_auth_lock() -> Result<FileLock> {
