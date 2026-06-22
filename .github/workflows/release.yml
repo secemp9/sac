@@ -1,22 +1,21 @@
-name: Edge Release
+name: Release
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run tests
-        run: cargo test --workspace --locked
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --locked
 
   build:
     needs: test
@@ -28,9 +27,7 @@ jobs:
             target: x86_64-unknown-linux-musl
           - runner: macos-26
             target: aarch64-apple-darwin
-
     runs-on: ${{ matrix.runner }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -40,50 +37,88 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build sac
+      - name: Build
         run: cargo build --release --locked -p sac --target ${{ matrix.target }}
 
-      - name: Package archive
+      - name: Package
         run: |
           mkdir -p dist
           tar -czf "dist/sac-${{ matrix.target }}.tar.gz" \
             -C "target/${{ matrix.target }}/release" sac
 
-      - name: Upload archive
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: sac-${{ matrix.target }}
           path: dist/sac-${{ matrix.target }}.tar.gz
 
-  publish:
+  release:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Download archives
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: dist
           pattern: sac-*
           merge-multiple: true
 
+      - name: Determine release type
+        id: meta
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "is_version=true" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=edge" >> "$GITHUB_OUTPUT"
+            echo "is_version=false" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        if: steps.meta.outputs.is_version == 'true'
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | grep -v "^${TAG}$" | head -1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            NOTES=$(git log --pretty=format:"- %s" "${PREV_TAG}..${TAG}")
+          else
+            NOTES=$(git log --pretty=format:"- %s" "${TAG}")
+          fi
+          {
+            echo "notes<<ENDOFNOTES"
+            echo "$NOTES"
+            echo "ENDOFNOTES"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish versioned release
+        if: steps.meta.outputs.is_version == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.meta.outputs.tag }}" dist/* \
+            --title "${{ steps.meta.outputs.tag }}" \
+            --notes "${{ steps.changelog.outputs.notes }}" \
+            --latest
+
       - name: Publish edge release
+        if: steps.meta.outputs.is_version == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
           git fetch --tags origin
-
           if gh release view edge >/dev/null 2>&1; then
             git tag -f edge "$GITHUB_SHA"
             git push origin refs/tags/edge --force
