@@ -32,14 +32,22 @@ const OAUTH_SCOPE: &str = "openid profile email offline_access api.connectors.re
 const DEFAULT_SERVER_PORT: u16 = 1455;
 const FALLBACK_SERVER_PORT: u16 = 1457;
 const REVOKE_TIMEOUT_SECS: u64 = 10;
+const CODEX_API_KEY_ENV: &str = "CODEX_API_KEY";
+const CODEX_ACCESS_TOKEN_ENV: &str = "CODEX_ACCESS_TOKEN";
+const AUTH_TYPE_API_KEY: &str = "api-key";
+const AUTH_TYPE_PAT: &str = "personal-access-token";
+const OPENAI_API_BASE_URL: &str = "https://api.openai.com/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredCodexAuth {
     #[serde(rename = "type")]
     auth_type: String,
     access: String,
+    #[serde(default)]
     refresh: String,
+    #[serde(default)]
     expires_at_ms: u64,
+    #[serde(default)]
     account_id: String,
 }
 
@@ -281,6 +289,42 @@ pub async fn codex_auth_login(headless: bool) -> Result<()> {
     }
 }
 
+pub fn codex_auth_login_api_key(api_key: &str) -> Result<()> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err(anyhow!("API key is empty"));
+    }
+    let auth = StoredCodexAuth {
+        auth_type: AUTH_TYPE_API_KEY.to_string(),
+        access: key.to_string(),
+        refresh: String::new(),
+        expires_at_ms: 0,
+        account_id: String::new(),
+    };
+    with_auth_lock(|| write_auth_file(&auth))?;
+    println!("API key auth saved.");
+    println!("path: {}", auth_file_path()?.display());
+    Ok(())
+}
+
+pub fn codex_auth_login_access_token(token: &str) -> Result<()> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(anyhow!("access token is empty"));
+    }
+    let auth = StoredCodexAuth {
+        auth_type: AUTH_TYPE_PAT.to_string(),
+        access: token.to_string(),
+        refresh: String::new(),
+        expires_at_ms: 0,
+        account_id: String::new(),
+    };
+    with_auth_lock(|| write_auth_file(&auth))?;
+    println!("Access token auth saved.");
+    println!("path: {}", auth_file_path()?.display());
+    Ok(())
+}
+
 async fn revoke_token(client: &Client, token: &str, token_type_hint: &str) -> Result<()> {
     let mut body = json!({
         "token": token,
@@ -319,10 +363,12 @@ async fn revoke_token(client: &Client, token: &str, token_type_hint: &str) -> Re
 
 pub async fn codex_auth_logout() -> Result<()> {
     let path = auth_file_path()?;
-    let client = Client::new();
 
     if let Ok(Some(auth)) = with_auth_lock(|| read_auth_file_optional()) {
-        let _ = revoke_token(&client, &auth.refresh, "refresh_token").await;
+        if auth.auth_type == AUTH_TYPE && !auth.refresh.is_empty() {
+            let client = Client::new();
+            let _ = revoke_token(&client, &auth.refresh, "refresh_token").await;
+        }
     }
 
     let removed = with_auth_lock(|| match fs::remove_file(&path) {
@@ -342,12 +388,31 @@ pub async fn codex_auth_logout() -> Result<()> {
 
 pub fn codex_auth_status() -> Result<()> {
     let path = auth_file_path()?;
+
+    if let Ok(key) = std::env::var(CODEX_API_KEY_ENV) {
+        if !key.is_empty() {
+            println!("Codex auth: {} (via {CODEX_API_KEY_ENV} env)", AUTH_TYPE_API_KEY);
+            return Ok(());
+        }
+    }
+    if let Ok(token) = std::env::var(CODEX_ACCESS_TOKEN_ENV) {
+        if !token.is_empty() {
+            let mode = if token.starts_with("at-") { AUTH_TYPE_PAT } else { "access-token" };
+            println!("Codex auth: {mode} (via {CODEX_ACCESS_TOKEN_ENV} env)");
+            return Ok(());
+        }
+    }
+
     let auth = with_auth_lock(|| read_auth_file_optional())?;
     match auth {
         Some(auth) => {
-            println!("Codex auth: signed in");
-            println!("account: {}", auth.account_id);
-            println!("expires: {}", expiry_status(auth.expires_at_ms));
+            println!("Codex auth: signed in ({})", auth.auth_type);
+            if !auth.account_id.is_empty() {
+                println!("account: {}", auth.account_id);
+            }
+            if auth.expires_at_ms > 0 {
+                println!("expires: {}", expiry_status(auth.expires_at_ms));
+            }
             println!("path: {}", path.display());
         }
         None => {
@@ -368,19 +433,24 @@ pub async fn send_responses(
     messages: Vec<Message>,
     tools: Vec<ToolDefinition>,
 ) -> Result<ModelTurnResponse> {
-    let url = codex_responses_url(base_url);
+    let auth = fresh_auth(client).await?;
+    let url = if auth.auth_type == AUTH_TYPE_API_KEY {
+        format!("{}/responses", OPENAI_API_BASE_URL.trim_end_matches('/'))
+    } else {
+        codex_responses_url(base_url)
+    };
     let request = codex_responses_request(model, reasoning_effort, reasoning_summary, reasoning_context, &messages, &tools);
     let started = Instant::now();
     tracing::info!(
         backend = ?BackendKind::ChatGptCodexResponses,
         model = %model,
+        auth_type = %auth.auth_type,
         reasoning_effort = ?reasoning_effort,
         message_count = messages.len(),
         tool_count = tools.len(),
         request_bytes = serde_json::to_vec(&request)?.len(),
         "starting codex responses turn"
     );
-    let auth = fresh_auth(client).await?;
 
     match post_codex_json_with_retry(client, &url, &request, &auth).await {
         Ok(value) => {
@@ -585,10 +655,50 @@ async fn parse_token_response(response: reqwest::Response, label: &str) -> Resul
     serde_json::from_str(&body).with_context(|| format!("failed to parse {label} response"))
 }
 
+fn resolve_auth_from_env() -> Option<StoredCodexAuth> {
+    if let Ok(key) = std::env::var(CODEX_API_KEY_ENV) {
+        if !key.is_empty() {
+            return Some(StoredCodexAuth {
+                auth_type: AUTH_TYPE_API_KEY.to_string(),
+                access: key,
+                refresh: String::new(),
+                expires_at_ms: 0,
+                account_id: String::new(),
+            });
+        }
+    }
+    if let Ok(token) = std::env::var(CODEX_ACCESS_TOKEN_ENV) {
+        if !token.is_empty() {
+            let auth_type = if token.starts_with("at-") {
+                AUTH_TYPE_PAT
+            } else {
+                AUTH_TYPE
+            };
+            return Some(StoredCodexAuth {
+                auth_type: auth_type.to_string(),
+                access: token,
+                refresh: String::new(),
+                expires_at_ms: 0,
+                account_id: String::new(),
+            });
+        }
+    }
+    None
+}
+
+fn auth_needs_refresh(auth: &StoredCodexAuth) -> bool {
+    auth.auth_type == AUTH_TYPE
+        && auth.expires_at_ms > 0
+        && !auth.refresh.is_empty()
+}
+
 async fn fresh_auth(client: &Client) -> Result<StoredCodexAuth> {
+    if let Some(auth) = resolve_auth_from_env() {
+        return Ok(auth);
+    }
     let _lock = acquire_auth_lock()?;
     let auth = read_auth_file()?;
-    if auth.expires_at_ms > now_ms().saturating_add(REFRESH_SKEW_MS) {
+    if !auth_needs_refresh(&auth) || auth.expires_at_ms > now_ms().saturating_add(REFRESH_SKEW_MS) {
         tracing::debug!(
             remaining_ms = auth.expires_at_ms.saturating_sub(now_ms()),
             "reusing existing codex auth token"
@@ -604,8 +714,20 @@ async fn fresh_auth(client: &Client) -> Result<StoredCodexAuth> {
 }
 
 async fn force_refresh_auth(client: &Client) -> Result<StoredCodexAuth> {
+    if let Some(auth) = resolve_auth_from_env() {
+        return Err(anyhow!(
+            "401 Unauthorized with {} auth (env var). Check your key/token.",
+            auth.auth_type
+        ));
+    }
     let _lock = acquire_auth_lock()?;
     let auth = read_auth_file()?;
+    if !auth_needs_refresh(&auth) {
+        return Err(anyhow!(
+            "401 Unauthorized with {} auth. Re-run `sac codex-auth login` to re-authenticate.",
+            auth.auth_type
+        ));
+    }
     tracing::warn!(
         refresh_trigger = "401",
         "forcing codex auth refresh after unauthorized response"
@@ -757,15 +879,22 @@ async fn post_codex_json_with_retry(
             "starting codex HTTP attempt"
         );
 
-        let response = client
+        let mut req = client
             .post(url)
             .header("Authorization", format!("Bearer {}", auth.access))
-            .header("ChatGPT-Account-Id", auth.account_id.as_str())
             .header("originator", ORIGINATOR)
             .header("User-Agent", codex_user_agent())
-            .header("OpenAI-Beta", "responses=experimental")
             .header(header::ACCEPT, "text/event-stream")
-            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_TYPE, "application/json");
+
+        if !auth.account_id.is_empty() {
+            req = req.header("ChatGPT-Account-Id", auth.account_id.as_str());
+        }
+        if auth.auth_type == AUTH_TYPE_API_KEY {
+            req = req.header("OpenAI-Beta", "responses=v1");
+        }
+
+        let response = req
             .json(body)
             .send()
             .await
@@ -1042,7 +1171,8 @@ fn read_auth_file_optional() -> Result<Option<StoredCodexAuth>> {
     };
     let auth: StoredCodexAuth = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    if auth.auth_type != AUTH_TYPE {
+    let valid_types = [AUTH_TYPE, AUTH_TYPE_API_KEY, AUTH_TYPE_PAT];
+    if !valid_types.contains(&auth.auth_type.as_str()) {
         return Err(anyhow!(
             "{} contains unsupported auth type '{}'",
             path.display(),

@@ -212,6 +212,12 @@ pub(super) enum CodexAuthCommand {
         /// Use device code flow instead of browser login (for SSH/headless environments)
         #[arg(long)]
         headless: bool,
+        /// Read an OpenAI API key from stdin (e.g. echo "sk-..." | sac codex-auth login --with-api-key)
+        #[arg(long, conflicts_with_all = ["headless", "with_access_token"])]
+        with_api_key: bool,
+        /// Read a personal access token from stdin (e.g. echo "at-..." | sac codex-auth login --with-access-token)
+        #[arg(long, conflicts_with_all = ["headless", "with_api_key"])]
+        with_access_token: bool,
     },
     /// Show stored Codex auth status
     Status,

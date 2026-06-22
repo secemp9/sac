@@ -20,7 +20,10 @@ mod types;
 mod usage;
 
 pub use backend::detect_backend;
-pub use chatgpt_codex::{codex_auth_login, codex_auth_logout, codex_auth_status};
+pub use chatgpt_codex::{
+    codex_auth_login, codex_auth_login_access_token, codex_auth_login_api_key, codex_auth_logout,
+    codex_auth_status,
+};
 pub use client::ModelClient;
 pub use types::*;
 

@@ -12,7 +12,8 @@ use crate::agents_md::AgentsMdBundle;
 use crate::events::EventSink;
 use crate::mcp::McpRegistry;
 use crate::model::{
-    codex_auth_login, codex_auth_logout, codex_auth_status, BackendKind, ClientOverrides,
+    codex_auth_login, codex_auth_login_access_token, codex_auth_login_api_key,
+    codex_auth_logout, codex_auth_status, BackendKind, ClientOverrides,
     ModelClient, ReasoningContext, ReasoningEffort, ReasoningSummary,
 };
 use crate::sandbox::{
@@ -382,7 +383,19 @@ fn run_config_cli(cli: ConfigCli) -> Result<()> {
 
 async fn run_codex_auth_cli(cli: CodexAuthCli) -> Result<()> {
     match cli.command {
-        Some(CodexAuthCommand::Login { headless }) => codex_auth_login(headless).await,
+        Some(CodexAuthCommand::Login { with_api_key: true, .. }) => {
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)
+                .context("failed to read API key from stdin")?;
+            codex_auth_login_api_key(&input)
+        }
+        Some(CodexAuthCommand::Login { with_access_token: true, .. }) => {
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)
+                .context("failed to read access token from stdin")?;
+            codex_auth_login_access_token(&input)
+        }
+        Some(CodexAuthCommand::Login { headless, .. }) => codex_auth_login(headless).await,
         Some(CodexAuthCommand::Status) => codex_auth_status(),
         Some(CodexAuthCommand::Logout) => codex_auth_logout().await,
         None => {
