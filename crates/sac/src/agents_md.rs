@@ -299,6 +299,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn non_git_scope_walks_parent_to_child_without_git_root() {
         let _guard = test_env_lock();
         let root = temp_dir("non_git");

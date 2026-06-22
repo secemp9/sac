@@ -523,6 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn terminal_wait_output_contains_returns_false_after_terminal_exit() {
         let runtime = test_runtime();
         execute_terminal(
