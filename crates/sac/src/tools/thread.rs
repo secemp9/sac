@@ -519,6 +519,10 @@ impl WorkerTimeoutTrace {
             | AgentEvent::ThreadSpawned { .. }
             | AgentEvent::ThreadFinished { .. } => {}
             AgentEvent::StreamTextDelta { .. } | AgentEvent::StreamComplete { .. } => {}
+            AgentEvent::ModelIterationUsage { .. } => {}
+            AgentEvent::GoalContinuation { .. }
+            | AgentEvent::GoalTurnAccounted { .. }
+            | AgentEvent::GoalErrorTransition { .. } => {}
         }
     }
 

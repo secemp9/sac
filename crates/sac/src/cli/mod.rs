@@ -598,6 +598,7 @@ async fn build_run_cli_config(cli: RunCli, config: &NacConfig) -> Result<Orchest
             extra_tool_defs: Vec::new(),
             agents_md_message,
             thread_timeout_secs: worker_thread_timeout_secs(config),
+            steering_rx: None,
         },
     );
     let session_snapshot = sessions::new_snapshot(
@@ -688,6 +689,7 @@ async fn build_managed_worker_config(
             extra_tool_defs,
             agents_md_message,
             thread_timeout_secs: worker_thread_timeout_secs(config),
+            steering_rx: None,
         },
     );
 

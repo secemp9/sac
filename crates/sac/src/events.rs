@@ -68,6 +68,24 @@ pub enum AgentEvent {
     RunFinished {
         thread_name: Option<String>,
     },
+    /// Emitted after each model iteration with per-iteration and cumulative
+    /// token usage.  Allows the TUI to perform incremental goal-budget
+    /// accounting and inject mid-turn steering messages when the budget is
+    /// exceeded.
+    ModelIterationUsage {
+        thread_name: Option<String>,
+        iteration: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        completion_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_tokens: Option<u32>,
+        /// Cumulative usage across all iterations in this send() so far.
+        cumulative_usage: crate::types::Usage,
+    },
     StreamTextDelta {
         thread_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +93,27 @@ pub enum AgentEvent {
     },
     StreamComplete {
         thread_name: Option<String>,
+    },
+    /// Emitted by the agent when it auto-continues for an active goal.
+    /// The agent handles continuation internally (engine-level), and this
+    /// event lets the TUI track each continuation turn for display.
+    GoalContinuation {
+        /// Zero-indexed continuation turn number (0 = first continuation
+        /// after the initial user-submitted turn).
+        continuation_turn: usize,
+    },
+    /// Emitted by the agent after each inner turn within a goal-driven
+    /// send to report token/time usage for that turn, so the TUI can
+    /// update its goal accounting.
+    GoalTurnAccounted {
+        token_delta: i64,
+        time_delta_seconds: i64,
+    },
+    /// Emitted when the agent encounters a turn error during goal
+    /// continuation and transitions the goal to an error state.
+    GoalErrorTransition {
+        new_status: String,
+        error_message: String,
     },
 }
 

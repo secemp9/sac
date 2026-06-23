@@ -88,8 +88,9 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
              session_id TEXT PRIMARY KEY,
              objective TEXT NOT NULL,
              status TEXT NOT NULL DEFAULT 'active',
-             turns_completed INTEGER NOT NULL DEFAULT 0,
-             max_turns INTEGER NOT NULL DEFAULT 10,
+             tokens_used INTEGER NOT NULL DEFAULT 0,
+             time_used_seconds INTEGER NOT NULL DEFAULT 0,
+             token_budget INTEGER,
              created_at TEXT NOT NULL,
              updated_at TEXT NOT NULL
          );
@@ -114,6 +115,10 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     )?;
     ensure_column(&conn, "sessions", "response_durations_ms_json", "TEXT")?;
     ensure_column(&conn, "sessions", "timeline_json", "TEXT")?;
+    ensure_column(&conn, "goals", "goal_id", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(&conn, "goals", "tokens_used", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(&conn, "goals", "time_used_seconds", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(&conn, "goals", "token_budget", "INTEGER")?;
     tracing::trace!(db_path = %path.display(), "SQLite store connection ready");
     Ok(conn)
 }

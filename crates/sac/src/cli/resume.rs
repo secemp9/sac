@@ -58,6 +58,7 @@ pub(super) async fn build_resume_picker_config(
             extra_tool_defs: Vec::new(),
             agents_md_message: agents_md.system_message(),
             thread_timeout_secs: worker_thread_timeout_secs(config),
+            steering_rx: None,
         },
     );
 
@@ -231,6 +232,7 @@ async fn build_resume_config_from_snapshot(
             extra_tool_defs: Vec::new(),
             agents_md_message: None,
             thread_timeout_secs: worker_thread_timeout_secs(config),
+            steering_rx: None,
         },
     );
     agent.restore_messages(snapshot.messages.clone());

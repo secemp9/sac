@@ -108,6 +108,7 @@ pub fn orchestrator_tool_definitions() -> Vec<ToolDefinition> {
         workset::read_definition(),
         workset::list_definition(),
         goal::get_goal_definition(),
+        goal::create_goal_definition(),
         goal::update_goal_definition(),
     ]
 }
@@ -218,6 +219,7 @@ pub async fn execute_tool(
         "workset_read" => workset::execute_read(args, runtime).await,
         "workset_list" => workset::execute_list(args, runtime).await,
         "get_goal" => goal::execute_get_goal(args, runtime).await,
+        "create_goal" => goal::execute_create_goal(args, runtime).await,
         "update_goal" => goal::execute_update_goal(args, runtime).await,
         unknown => ToolResult {
             content: format!("Error: unknown tool '{}'", unknown),

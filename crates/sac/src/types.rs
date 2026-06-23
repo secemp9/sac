@@ -70,12 +70,50 @@ pub struct FunctionDef {
     pub parameters: Value,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Usage {
     pub prompt_tokens: Option<u32>,
     pub completion_tokens: Option<u32>,
     pub total_tokens: Option<u32>,
     pub reasoning_tokens: Option<u32>,
+    /// Cached input tokens (prompt tokens served from cache).
+    /// Extracted from `prompt_tokens_details.cached_tokens` (Chat API)
+    /// or `input_tokens_details.cached_tokens` (Responses API).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u32>,
+}
+
+impl Usage {
+    /// Accumulate another usage report into this one by summing each field.
+    pub fn accumulate(&mut self, other: &Usage) {
+        fn add_opt(a: &mut Option<u32>, b: Option<u32>) {
+            match (a.as_mut(), b) {
+                (Some(existing), Some(val)) => *existing = existing.saturating_add(val),
+                (None, Some(val)) => *a = Some(val),
+                _ => {}
+            }
+        }
+        add_opt(&mut self.prompt_tokens, other.prompt_tokens);
+        add_opt(&mut self.completion_tokens, other.completion_tokens);
+        add_opt(&mut self.total_tokens, other.total_tokens);
+        add_opt(&mut self.reasoning_tokens, other.reasoning_tokens);
+        add_opt(&mut self.cached_tokens, other.cached_tokens);
+    }
+
+    /// Compute the goal-accounting token delta following Codex's formula:
+    /// `(input_tokens - cached_input_tokens) + output_tokens`.
+    ///
+    /// Cached input tokens are subtracted because they represent prompt
+    /// tokens served from cache and therefore cost less.  Uses `max(0)`
+    /// on the subtraction to avoid negative deltas in the unlikely case
+    /// that cached tokens exceed prompt tokens (they are normally a
+    /// subset).
+    pub fn goal_token_delta(&self) -> i64 {
+        let prompt = self.prompt_tokens.unwrap_or(0) as i64;
+        let cached = self.cached_tokens.unwrap_or(0) as i64;
+        let completion = self.completion_tokens.unwrap_or(0) as i64;
+        (prompt - cached).max(0).saturating_add(completion)
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +208,84 @@ mod tests {
         let json = serde_json::to_string(&tool).unwrap();
         assert!(json.contains("\"role\":\"tool\""), "Got: {}", json);
         assert!(json.contains("tool_call_id"), "Got: {}", json);
+    }
+
+    #[test]
+    fn goal_token_delta_without_cached_tokens() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            total_tokens: Some(150),
+            reasoning_tokens: None,
+            cached_tokens: None,
+        };
+        // Without cached tokens, delta = prompt + completion
+        assert_eq!(usage.goal_token_delta(), 150);
+    }
+
+    #[test]
+    fn goal_token_delta_with_cached_tokens() {
+        let usage = Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(200),
+            total_tokens: Some(1200),
+            reasoning_tokens: None,
+            cached_tokens: Some(800),
+        };
+        // (1000 - 800) + 200 = 400
+        assert_eq!(usage.goal_token_delta(), 400);
+    }
+
+    #[test]
+    fn goal_token_delta_cached_exceeds_prompt_clamps_to_zero() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            total_tokens: Some(150),
+            reasoning_tokens: None,
+            cached_tokens: Some(200),
+        };
+        // (100 - 200) clamps to 0, then + 50 = 50
+        assert_eq!(usage.goal_token_delta(), 50);
+    }
+
+    #[test]
+    fn goal_token_delta_all_none() {
+        let usage = Usage::default();
+        assert_eq!(usage.goal_token_delta(), 0);
+    }
+
+    #[test]
+    fn accumulate_includes_cached_tokens() {
+        let mut total = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(50),
+            total_tokens: Some(150),
+            reasoning_tokens: None,
+            cached_tokens: Some(80),
+        };
+        let other = Usage {
+            prompt_tokens: Some(200),
+            completion_tokens: Some(60),
+            total_tokens: Some(260),
+            reasoning_tokens: None,
+            cached_tokens: Some(150),
+        };
+        total.accumulate(&other);
+        assert_eq!(total.prompt_tokens, Some(300));
+        assert_eq!(total.completion_tokens, Some(110));
+        assert_eq!(total.total_tokens, Some(410));
+        assert_eq!(total.cached_tokens, Some(230));
+    }
+
+    #[test]
+    fn accumulate_cached_tokens_none_plus_some() {
+        let mut total = Usage::default();
+        let other = Usage {
+            cached_tokens: Some(100),
+            ..Default::default()
+        };
+        total.accumulate(&other);
+        assert_eq!(total.cached_tokens, Some(100));
     }
 }

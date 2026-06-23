@@ -345,6 +345,9 @@ pub async fn run(
                             .map(|started| started.elapsed())
                             .unwrap_or_default();
                         app.result_rx = None;
+                        app.steering_tx = None;
+                        app.goal_pause_tx = None;
+                        app.budget_limit_steering_sent = false;
                         app.working_frame = 0;
                         app.working_started_at = None;
                         app.reset_life();
@@ -353,9 +356,20 @@ pub async fn run(
                                 app.complete_top_level_response(response, completed_duration);
                             }
                             Err(error) => {
+                                // Goal error transitions are now handled
+                                // inside the agent's send_with_goal() loop,
+                                // which emits GoalErrorTransition events.
+                                // The TUI just records the send error.
                                 app.note_send_error(error);
                             }
                         }
+                        // Goal accounting is now done per-turn inside
+                        // the agent's send_with_goal() loop, which emits
+                        // GoalTurnAccounted events.  Reload the goal from
+                        // the store to get the final state after all
+                        // continuation turns.
+                        app.reload_goal_from_store();
+
                         if let Some(snapshot) = session_snapshot.as_mut() {
                             let agent = agent.lock().await;
                             let (last_response_duration_ms, previous_response_duration_ms) =
@@ -375,34 +389,13 @@ pub async fn run(
                             .await?;
                         }
 
-                        // Handle deferred goal pause/clear from user input
-                        // during the agent run (flags set via /goal pause,
-                        // /goal clear, or Escape key while agent was working).
-                        if app.goal_clear_requested {
-                            app.goal_clear_requested = false;
-                            app.goal_pause_requested = false;
-                            app.clear_goal();
-                        } else if app.goal_pause_requested {
-                            app.goal_pause_requested = false;
-                            app.pause_goal();
-                        }
-
-                        // Goal auto-continuation (skipped if goal was just
-                        // paused or cleared by the deferred flags above).
-                        if app.goal_should_continue() {
-                            app.increment_goal_turn();
-                            let continuation_prompt = app.build_goal_continuation_prompt();
-                            app.push_timeline(
-                                "goal",
-                                format!("auto-continuing (turn {})", app.goal.as_ref().map(|g| g.turns_completed).unwrap_or(0)),
-                                Tone::Info,
-                            );
-                            submit_prompt(continuation_prompt, agent.clone(), &mut app, &mut terminal)?;
-                        } else if app.goal.as_ref().is_some_and(|g| {
-                            g.status == crate::goal::GoalStatus::Active && g.turns_completed >= g.max_turns
-                        }) {
-                            app.goal_hit_turn_limit();
-                        }
+                        // Deferred goal pause/clear is now handled by the
+                        // agent's send_with_goal() via goal_pause_tx, but
+                        // clear the TUI-side flags for cases where
+                        // send_with_goal was not used (no goal was active
+                        // at prompt submission time).
+                        app.goal_clear_requested = false;
+                        app.goal_pause_requested = false;
                     }
                 }
                 _ = animation_tick.tick() => {
@@ -479,6 +472,28 @@ fn submit_prompt(
     app.working_frame = 0;
     app.working_started_at = Some(Instant::now());
     app.reset_life();
+    app.budget_limit_steering_sent = false;
+
+    // Create a fresh steering channel for this turn.  The sender stays
+    // with the TUI (stored in app.steering_tx) so it can push mid-turn
+    // steering messages.  The receiver is attached to the agent before
+    // the send() call.
+    let (steering_tx, steering_rx) = mpsc::unbounded_channel::<String>();
+    app.steering_tx = Some(steering_tx);
+
+    // Create a goal pause/clear signaling channel.  The TUI sends
+    // "pause" or "clear" strings; the agent's send_with_goal() drains
+    // this between continuation turns.
+    let (goal_pause_tx, goal_pause_rx) = mpsc::unbounded_channel::<String>();
+    app.goal_pause_tx = Some(goal_pause_tx);
+
+    // Determine whether the agent should use goal-aware continuation.
+    // This is true when a goal is active at the time the prompt is
+    // submitted.  The agent will auto-continue internally.
+    let has_active_goal = app
+        .goal
+        .as_ref()
+        .is_some_and(|g| g.status == crate::goal::GoalStatus::Active);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.result_rx = Some(rx);
@@ -486,10 +501,18 @@ fn submit_prompt(
     tokio::spawn(async move {
         let result = {
             let mut agent = agent.lock().await;
-            agent
-                .send(&agent_prompt)
-                .await
-                .map_err(|error| error.to_string())
+            agent.set_steering_rx(steering_rx);
+            if has_active_goal {
+                agent
+                    .send_with_goal(&agent_prompt, Some(&mut { goal_pause_rx }))
+                    .await
+                    .map_err(|error| error.to_string())
+            } else {
+                agent
+                    .send(&agent_prompt)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
         };
         let _ = tx.send(result);
     });
