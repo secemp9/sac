@@ -829,6 +829,7 @@ mod tests {
                         depends_on: Vec::new(),
                         acceptance: "Auth entry points are identified.".to_string(),
                         notes: None,
+                        status: None,
                     },
                     store::WorksetItemDefinition {
                         title: "Apply auth flow update".to_string(),
@@ -838,6 +839,7 @@ mod tests {
                         depends_on: vec!["Inspect auth flow".to_string()],
                         acceptance: "The auth UI change is implemented.".to_string(),
                         notes: None,
+                        status: None,
                     },
                 ],
             },
@@ -897,6 +899,7 @@ mod tests {
             scope: "crates/sac/src/tui.rs".to_string(),
             description: "Make the scoped auth UI change.".to_string(),
             role: "implement".to_string(),
+            status: "planned".to_string(),
             depends_on: vec!["Inspect auth flow".to_string()],
             acceptance: "The auth UI change is implemented.".to_string(),
             notes: None,
@@ -927,6 +930,7 @@ mod tests {
             scope: "crates/sac/src/tui.rs and crates/sac/src/store.rs".to_string(),
             description: "Make the scoped auth UI change.".to_string(),
             role: "implement".to_string(),
+            status: "planned".to_string(),
             depends_on: vec!["Inspect auth flow before implementation starts".to_string()],
             acceptance: "The auth UI change is implemented and verified with targeted tests."
                 .to_string(),

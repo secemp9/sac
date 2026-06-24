@@ -66,6 +66,10 @@ pub fn define_definition() -> ToolDefinition {
                             "notes": {
                                 "type": "string",
                                 "description": "Optional durable context, risks, discoveries, or execution notes for this item."
+                            },
+                            "status": {
+                                "type": "string",
+                                "description": "Per-item status, such as planned, in_progress, blocked, completed, or skipped. Defaults to planned when omitted."
                             }
                         },
                         "required": ["title", "scope", "description", "role", "depends_on", "acceptance"]
@@ -73,6 +77,36 @@ pub fn define_definition() -> ToolDefinition {
                 }
             },
             "required": ["id", "goal", "status", "summary", "items"]
+        }),
+    )
+}
+
+pub fn update_item_definition() -> ToolDefinition {
+    use serde_json::json;
+    def(
+        "workset_update_item",
+        "Update a single workset item's status and notes without replacing the entire workset. Use this to track execution progress as you complete work.",
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Workset id"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Title of the item to update (must match exactly)"
+                },
+                "status": {
+                    "type": "string",
+                    "description": "New status: planned, running, blocked, done"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Key findings, results, or context to record"
+                }
+            },
+            "required": ["id", "title", "status"]
         }),
     )
 }
@@ -221,6 +255,80 @@ pub async fn execute_list(_args: Value, runtime: &ToolRuntime) -> ToolResult {
     }
 }
 
+pub async fn execute_update_item(args: Value, runtime: &ToolRuntime) -> ToolResult {
+    let session_id = match require_session(runtime) {
+        Ok(session_id) => session_id.to_string(),
+        Err(error) => return error,
+    };
+    let id = match require_str(&args, "id") {
+        Ok(id) => id,
+        Err(error) => return error,
+    };
+    let title = match require_str(&args, "title") {
+        Ok(title) => title,
+        Err(error) => return error,
+    };
+    let status = match require_str(&args, "status") {
+        Ok(status) => status,
+        Err(error) => return error,
+    };
+    let notes = match optional_string(&args, "notes") {
+        Ok(notes) => notes,
+        Err(error) => return error,
+    };
+
+    match status.as_str() {
+        "planned" | "running" | "blocked" | "done" => {}
+        _ => {
+            return ToolResult {
+                content: format!(
+                    "Error: invalid status '{}'. Must be one of: planned, running, blocked, done",
+                    status
+                ),
+                is_error: true,
+            };
+        }
+    }
+
+    let store_path = runtime.store_path.clone();
+    let sid = session_id.clone();
+    let wid = id.clone();
+    let t = title.clone();
+    let s = status.clone();
+    let n = notes.clone();
+    match tokio::task::spawn_blocking(move || {
+        store::update_workset_item(&store_path, &sid, &wid, &t, &s, n.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(true)) => ToolResult {
+            content: format!(
+                "Updated item '{}' in workset '{}' to status '{}'",
+                title, id, status
+            ),
+            is_error: false,
+        },
+        Ok(Ok(false)) => ToolResult {
+            content: format!("No item '{}' found in workset '{}'", title, id),
+            is_error: true,
+        },
+        Ok(Err(error)) => ToolResult {
+            content: format!(
+                "Error updating item '{}' in workset '{}': {}",
+                title, id, error
+            ),
+            is_error: true,
+        },
+        Err(join_error) => ToolResult {
+            content: format!(
+                "Internal error updating item '{}' in workset '{}': {}",
+                title, id, join_error
+            ),
+            is_error: true,
+        },
+    }
+}
+
 fn def(name: &str, description: &str, parameters: serde_json::Value) -> ToolDefinition {
     ToolDefinition {
         def_type: "function".to_string(),
@@ -294,6 +402,10 @@ fn parse_items(value: Option<&Value>) -> Result<Vec<WorksetItemDefinition>, Tool
             Ok(value) => value,
             Err(error) => return Err(error),
         };
+        let status = match optional_string(item, "status") {
+            Ok(value) => value,
+            Err(error) => return Err(error),
+        };
         parsed.push(WorksetItemDefinition {
             title,
             scope,
@@ -302,6 +414,7 @@ fn parse_items(value: Option<&Value>) -> Result<Vec<WorksetItemDefinition>, Tool
             depends_on,
             acceptance,
             notes,
+            status,
         });
     }
 

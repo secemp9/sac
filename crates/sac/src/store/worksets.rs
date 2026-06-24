@@ -70,7 +70,7 @@ pub fn define_workset(path: &Path, session_id: &str, workset: &WorksetDefinition
                 item.scope,
                 item.description,
                 item.role,
-                "planned",
+                item.status.as_deref().unwrap_or("planned"),
                 serde_json::to_string(&item.depends_on)?,
                 item.notes,
                 item.acceptance,
@@ -132,6 +132,57 @@ pub fn list_worksets(path: &Path, session_id: &str) -> Result<Vec<WorksetSummary
     Ok(worksets)
 }
 
+pub fn update_workset_item(
+    path: &Path,
+    session_id: &str,
+    workset_id: &str,
+    title: &str,
+    status: &str,
+    notes: Option<&str>,
+) -> Result<bool> {
+    tracing::debug!(
+        db_path = %path.display(),
+        session_id = %session_id,
+        workset_id = %workset_id,
+        title = %title,
+        status = %status,
+        "updating workset item"
+    );
+    let conn = open_connection(path)?;
+    let now = now_utc();
+
+    let rows_affected = conn.execute(
+        "UPDATE workset_items SET status = ?1, last_summary = COALESCE(?2, last_summary), updated_at = ?3
+         WHERE workset_id = ?4 AND session_id = ?5 AND title = ?6",
+        params![status, notes, now, workset_id, session_id, title],
+    )?;
+
+    if rows_affected > 0 {
+        conn.execute(
+            "UPDATE worksets SET updated_at = ?1 WHERE id = ?2 AND session_id = ?3",
+            params![now, workset_id, session_id],
+        )?;
+        tracing::info!(
+            db_path = %path.display(),
+            session_id = %session_id,
+            workset_id = %workset_id,
+            title = %title,
+            status = %status,
+            "workset item updated"
+        );
+        Ok(true)
+    } else {
+        tracing::info!(
+            db_path = %path.display(),
+            session_id = %session_id,
+            workset_id = %workset_id,
+            title = %title,
+            "workset item not found"
+        );
+        Ok(false)
+    }
+}
+
 fn row_to_workset(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorksetRecord> {
     Ok(WorksetRecord {
         id: row.get(0)?,
@@ -153,7 +204,7 @@ fn load_workset_items(
 ) -> Result<Vec<WorksetItemRecord>> {
     let mut stmt = conn.prepare(
         "SELECT position, title, scope, description, item_kind,
-                source_threads_json, last_summary, acceptance, updated_at
+                source_threads_json, last_summary, acceptance, updated_at, status
          FROM workset_items
          WHERE workset_id = ?1 AND session_id = ?2
          ORDER BY position ASC",
@@ -170,6 +221,7 @@ fn load_workset_items(
             scope: row.get(2)?,
             description: row.get(3)?,
             role: row.get(4)?,
+            status: row.get(9)?,
             depends_on,
             notes: row.get(6)?,
             acceptance: row.get(7)?,

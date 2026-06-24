@@ -51,6 +51,7 @@ pub struct WorksetItemRecord {
     pub scope: String,
     pub description: String,
     pub role: String,
+    pub status: String,
     pub depends_on: Vec<String>,
     pub acceptance: String,
     pub notes: Option<String>,
@@ -88,6 +89,7 @@ pub struct WorksetItemDefinition {
     pub depends_on: Vec<String>,
     pub acceptance: String,
     pub notes: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +217,7 @@ mod tests {
                     depends_on: Vec::new(),
                     acceptance: "Auth state behavior and risks are mapped.".to_string(),
                     notes: None,
+                    status: None,
                 },
                 WorksetItemDefinition {
                     title: "Implement auth state update".to_string(),
@@ -224,6 +227,7 @@ mod tests {
                     depends_on: vec!["Inspect auth state handling".to_string()],
                     acceptance: "Focused code change is applied.".to_string(),
                     notes: Some("waiting on research".to_string()),
+                    status: None,
                 },
             ],
         };

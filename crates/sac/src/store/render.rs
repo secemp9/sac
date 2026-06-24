@@ -83,10 +83,20 @@ pub fn render_workset_document(workset: &WorksetRecord) -> String {
         } else {
             item.depends_on.join(", ")
         };
-        rendered.push_str(&format!(
-            "\n\n{}. [{}] {}",
-            item.position, item.role, item.title
-        ));
+        if item.status != "planned" {
+            rendered.push_str(&format!(
+                "\n\n{}. [{}|{}] {}",
+                item.position,
+                item.role.to_ascii_uppercase(),
+                item.status.to_ascii_uppercase(),
+                item.title
+            ));
+        } else {
+            rendered.push_str(&format!(
+                "\n\n{}. [{}] {}",
+                item.position, item.role, item.title
+            ));
+        }
         rendered.push_str(&format!("\n   scope: {}", item.scope));
         rendered.push_str(&format!("\n   depends on: {}", dependencies));
         rendered.push_str(&format!("\n   description: {}", item.description));

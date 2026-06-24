@@ -177,8 +177,11 @@ impl Agent {
                      thread with the discovering thread as a source. You have broader context than any single \
                      worker — filter and synthesize findings rather than passing them through raw. Do not wait for \
                      workers to discover each other's output.\n\
-                     A workset is a durable high-level plan, not your current focus and not an execution \
-                     queue. A workset stores a goal, summary, status, verification recipe, and ordered \
+                     A workset is your external memory for plan state and execution progress. Use \
+                     workset_update_item to mark items as running, done, or blocked and record key \
+                     findings in the notes field as you complete work. This lets you maintain awareness \
+                     across many dispatches without carrying full results in context.\n\
+                     A workset stores a goal, summary, status, verification recipe, and ordered \
                      items with scope, role, dependencies, acceptance criteria, and optional notes.\n\
                      Workset schema: `id` is the short stable handle used by `/run <workset>`; `goal` is \
                      the enduring user-facing objective; `status` is the whole-plan state; `summary` is \
@@ -188,6 +191,11 @@ impl Agent {
                      mode such as research/implementation/verification, `depends_on` for prerequisite \
                      item titles or ids, `acceptance` for the concrete completion condition, and optional \
                      `notes` for durable context discovered while planning or running.\n\
+                     Context management: The harness automatically replaces old thread dispatch results \
+                     with compact reference stubs after you have processed them. If you need to re-examine \
+                     a prior thread's output, use thread_read(name). You do not need to carry full thread \
+                     results in your working memory — they are retained in the episode database and \
+                     retrievable on demand.\n\
                      Avoid creating extra Markdown documents or notes files unless the user explicitly \
                      asks for them.\n\
                      You may dispatch independent threads in parallel when useful.\n\n\
@@ -197,6 +205,7 @@ impl Agent {
                      - thread_read(name)\n\
                      - thread_delete(name)\n\
                      - workset_define(id, goal, status, summary, verification_recipe?, items[])\n\
+                     - workset_update_item(id, title, status, notes?)\n\
                      - workset_read(id)\n\
                      - workset_list()\n\n\
                      You must use threads for all coding work. You cannot read, write, or edit files directly.",
@@ -326,6 +335,8 @@ impl Agent {
                     iteration,
                 });
 
+                self.compact_old_thread_results();
+
                 let response = match self
                     .client
                     .send_turn(self.messages.clone(), self.tool_defs.clone())
@@ -359,7 +370,7 @@ impl Agent {
 
                 if response.finish_reason.as_deref() == Some("length") {
                     let error = anyhow!(
-                        "Context window full (finish_reason=length). sac does not auto-compact thread history right now; retry with a narrower prompt, a fresh thread, or less carried context."
+                        "Context window full (finish_reason=length). Consider using smaller thread dispatches or reviewing workset progress with workset_read."
                     );
                     self.emit(AgentEvent::Error {
                         thread_name: self.thread_name.clone(),
@@ -634,6 +645,8 @@ impl Agent {
                 iteration,
             });
 
+            self.compact_old_thread_results();
+
             let response = match self
                 .client
                 .send_turn(self.messages.clone(), self.tool_defs.clone())
@@ -664,7 +677,7 @@ impl Agent {
 
             if response.finish_reason.as_deref() == Some("length") {
                 let error = anyhow!(
-                    "Context window full (finish_reason=length). sac does not auto-compact thread history right now; retry with a narrower prompt, a fresh thread, or less carried context."
+                    "Context window full (finish_reason=length). Consider using smaller thread dispatches or reviewing workset progress with workset_read."
                 );
                 self.emit(AgentEvent::Error {
                     thread_name: self.thread_name.clone(),
@@ -796,6 +809,97 @@ impl Agent {
 
     pub fn restore_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+    }
+
+    /// Replace large `Message::Tool` results from old `thread` dispatches
+    /// with compact reference stubs.  "Old" means the Tool message appears
+    /// before the 2nd-most-recent `Message::Assistant`, giving the model at
+    /// least one full round to process the result before it is stubbed out.
+    fn compact_old_thread_results(&mut self) {
+        // 1. Find the boundary: index of the 2nd-most-recent Assistant message.
+        let mut assistant_count = 0usize;
+        let mut boundary_index: Option<usize> = None;
+        for i in (0..self.messages.len()).rev() {
+            if matches!(self.messages[i], Message::Assistant { .. }) {
+                assistant_count += 1;
+                if assistant_count == 2 {
+                    boundary_index = Some(i);
+                    break;
+                }
+            }
+        }
+
+        let boundary = match boundary_index {
+            Some(idx) => idx,
+            None => return, // fewer than 2 Assistant messages — nothing old enough
+        };
+
+        // 2. For each Tool message before the boundary, check if it's a
+        //    thread dispatch result that's large enough to compact.
+        for i in 0..boundary {
+            // We need to check if messages[i] is a Tool, then find its
+            // matching Assistant.  Because we mutate messages[i] in place
+            // we split the borrow: first gather info immutably, then mutate.
+            let (tool_call_id, content_len) = match &self.messages[i] {
+                Message::Tool {
+                    tool_call_id,
+                    content,
+                } => (tool_call_id.clone(), content.len()),
+                _ => continue,
+            };
+
+            if content_len <= 500 {
+                continue;
+            }
+
+            // Scan backwards from position i to find the Assistant whose
+            // tool_calls contains a ToolCall with matching id.
+            let mut is_thread_dispatch = false;
+            let mut thread_name = String::new();
+            for j in (0..i).rev() {
+                if let Message::Assistant {
+                    tool_calls: Some(ref calls),
+                    ..
+                } = self.messages[j]
+                {
+                    if let Some(tc) = calls.iter().find(|tc| tc.id == tool_call_id) {
+                        if tc.function.name == "thread" {
+                            // Parse the arguments JSON to extract the thread name
+                            if let Ok(args) =
+                                serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                            {
+                                thread_name = args["name"]
+                                    .as_str()
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                                is_thread_dispatch = true;
+                            }
+                        }
+                        break; // found the matching Assistant, stop scanning
+                    }
+                }
+            }
+
+            if !is_thread_dispatch {
+                continue;
+            }
+
+            // Replace the Tool message content with a compact stub.
+            if let Message::Tool {
+                content: ref mut c, ..
+            } = self.messages[i]
+            {
+                tracing::info!(
+                    thread_name = %thread_name,
+                    original_len = content_len,
+                    "compacted old thread result to reference stub"
+                );
+                *c = format!(
+                    "[Thread '{}' episode retained in DB. Use thread_read('{}') to retrieve full content.]",
+                    thread_name, thread_name
+                );
+            }
+        }
     }
 
     fn emit(&self, event: AgentEvent) {
