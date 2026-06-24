@@ -92,3 +92,6 @@ For the full set of shared config options (model, sandbox, worker, MCP servers),
 ## For everything else
 
 Threading, worksets, sandbox flags, MCP configuration, skills, AGENTS.md, and session storage all work the same as in NAC. See [NAC's README](https://github.com/arcee-ai/nac) for documentation on shared features.
+
+
+Honorable credit: [@nyxkrage](https://github.com/nyxkrage) for his fork/changes on [nac](https://github.com/arcee-ai/nac) and [@sapiosaturn](https://github.com/sapiosaturn) for nac 🙏
