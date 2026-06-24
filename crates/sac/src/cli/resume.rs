@@ -235,7 +235,35 @@ async fn build_resume_config_from_snapshot(
             steering_rx: None,
         },
     );
-    agent.restore_messages(snapshot.messages.clone());
+    const LEAN_RESUME_BYTE_THRESHOLD: usize = 2_000_000; // 2MB
+
+    // Check if the session's messages are too large for the context window
+    let should_lean_resume = crate::sessions::messages_json_byte_size(
+        &snapshot.store_path,
+        &snapshot.session_id,
+    )
+    .ok()
+    .flatten()
+    .map(|size| size > LEAN_RESUME_BYTE_THRESHOLD)
+    .unwrap_or(false);
+
+    if should_lean_resume {
+        tracing::warn!(
+            session_id = %snapshot.session_id,
+            threshold = LEAN_RESUME_BYTE_THRESHOLD,
+            "session messages exceed lean resume threshold; bootstrapping from externalized state"
+        );
+        // Archive old messages before clearing
+        let _ = crate::sessions::archive_messages(
+            &snapshot.store_path,
+            &snapshot.session_id,
+        );
+        // Don't load old messages — the agent already has a fresh system prompt.
+        // Bootstrap from externalized state (goals, threads, worksets in SQLite).
+        agent.lean_resume()?;
+    } else {
+        agent.restore_messages(snapshot.messages.clone());
+    }
 
     let session_id = snapshot.session_id.clone();
     Ok(OrchestratorRunConfig {

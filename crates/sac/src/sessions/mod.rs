@@ -13,7 +13,10 @@ mod db;
 mod snapshot;
 mod summary;
 
-pub use db::{create_session, list_sessions, load_last_session, load_session, save_session};
+pub use db::{
+    archive_messages, create_session, list_sessions, load_last_session, load_session,
+    messages_json_byte_size, save_session,
+};
 pub use snapshot::{new_snapshot, refresh_snapshot};
 
 use codec::*;

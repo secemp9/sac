@@ -1909,6 +1909,13 @@ impl App {
                 };
                 self.show_composer_notice(notice, Tone::Warning);
             }
+            AgentEvent::LeanResumeTriggered { .. } => {
+                self.push_timeline(
+                    "system",
+                    format!("lean resume: context exceeded — bootstrapping from externalized state"),
+                    Tone::Warning,
+                );
+            }
         }
     }
 

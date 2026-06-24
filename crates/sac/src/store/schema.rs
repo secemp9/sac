@@ -115,6 +115,7 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     )?;
     ensure_column(&conn, "sessions", "response_durations_ms_json", "TEXT")?;
     ensure_column(&conn, "sessions", "timeline_json", "TEXT")?;
+    ensure_column(&conn, "sessions", "archived_messages_json", "TEXT")?;
     ensure_column(&conn, "goals", "goal_id", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(&conn, "goals", "tokens_used", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(&conn, "goals", "time_used_seconds", "INTEGER NOT NULL DEFAULT 0")?;

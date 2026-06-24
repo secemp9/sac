@@ -328,6 +328,7 @@ impl Agent {
             });
 
             let mut iteration = 0usize;
+            let mut lean_resumed = false;
             loop {
                 iteration = iteration.saturating_add(1);
                 self.emit(AgentEvent::ModelCallStarted {
@@ -343,6 +344,22 @@ impl Agent {
                     .await
                 {
                     Ok(response) => response,
+                    Err(error) if !lean_resumed && self.is_context_overflow_error(&error) => {
+                        lean_resumed = true;
+                        self.emit(AgentEvent::LeanResumeTriggered {
+                            thread_name: self.thread_name.clone(),
+                            reason: error.to_string(),
+                        });
+                        // Archive old messages before clearing
+                        if let Some(ref sid) = self.tool_runtime.session_id {
+                            let _ = crate::sessions::archive_messages(
+                                &self.tool_runtime.store_path,
+                                sid,
+                            );
+                        }
+                        self.lean_resume()?;
+                        continue; // retry the loop with lean context
+                    }
                     Err(error) => {
                         self.emit(AgentEvent::Error {
                             thread_name: self.thread_name.clone(),
@@ -369,6 +386,23 @@ impl Agent {
                 });
 
                 if response.finish_reason.as_deref() == Some("length") {
+                    if !lean_resumed {
+                        lean_resumed = true;
+                        let reason = "Context window full (finish_reason=length)".to_string();
+                        self.emit(AgentEvent::LeanResumeTriggered {
+                            thread_name: self.thread_name.clone(),
+                            reason: reason.clone(),
+                        });
+                        // Archive old messages before clearing
+                        if let Some(ref sid) = self.tool_runtime.session_id {
+                            let _ = crate::sessions::archive_messages(
+                                &self.tool_runtime.store_path,
+                                sid,
+                            );
+                        }
+                        self.lean_resume()?;
+                        continue; // retry the loop with lean context
+                    }
                     let error = anyhow!(
                         "Context window full (finish_reason=length). Consider using smaller thread dispatches or reviewing workset progress with workset_read."
                     );
@@ -638,6 +672,7 @@ impl Agent {
         });
 
         let mut iteration = 0usize;
+        let mut lean_resumed = false;
         loop {
             iteration = iteration.saturating_add(1);
             self.emit(AgentEvent::ModelCallStarted {
@@ -653,6 +688,22 @@ impl Agent {
                 .await
             {
                 Ok(response) => response,
+                Err(error) if !lean_resumed && self.is_context_overflow_error(&error) => {
+                    lean_resumed = true;
+                    self.emit(AgentEvent::LeanResumeTriggered {
+                        thread_name: self.thread_name.clone(),
+                        reason: error.to_string(),
+                    });
+                    // Archive old messages before clearing
+                    if let Some(ref sid) = self.tool_runtime.session_id {
+                        let _ = crate::sessions::archive_messages(
+                            &self.tool_runtime.store_path,
+                            sid,
+                        );
+                    }
+                    self.lean_resume()?;
+                    continue; // retry the loop with lean context
+                }
                 Err(error) => {
                     self.emit(AgentEvent::Error {
                         thread_name: self.thread_name.clone(),
@@ -676,6 +727,23 @@ impl Agent {
             });
 
             if response.finish_reason.as_deref() == Some("length") {
+                if !lean_resumed {
+                    lean_resumed = true;
+                    let reason = "Context window full (finish_reason=length)".to_string();
+                    self.emit(AgentEvent::LeanResumeTriggered {
+                        thread_name: self.thread_name.clone(),
+                        reason: reason.clone(),
+                    });
+                    // Archive old messages before clearing
+                    if let Some(ref sid) = self.tool_runtime.session_id {
+                        let _ = crate::sessions::archive_messages(
+                            &self.tool_runtime.store_path,
+                            sid,
+                        );
+                    }
+                    self.lean_resume()?;
+                    continue; // retry the loop with lean context
+                }
                 let error = anyhow!(
                     "Context window full (finish_reason=length). Consider using smaller thread dispatches or reviewing workset progress with workset_read."
                 );
@@ -900,6 +968,107 @@ impl Agent {
                 );
             }
         }
+    }
+
+    /// Check whether the given error represents a context overflow / context
+    /// window exhaustion from the model provider.  Only returns `true` for
+    /// the orchestrator (workers should not attempt lean resume).
+    fn is_context_overflow_error(&self, error: &anyhow::Error) -> bool {
+        // Only for orchestrator, not workers
+        if self.thread_name.is_some() {
+            return false;
+        }
+        let msg = error.to_string().to_ascii_lowercase();
+        msg.contains("context_length_exceeded")
+            || msg.contains("context length exceeded")
+            || msg.contains("maximum context length")
+            || msg.contains("exceeds the context window")
+            || msg.contains("too many tokens")
+            || msg.contains("input is too long")
+            || (msg.contains("context window full") && msg.contains("finish_reason"))
+    }
+
+    /// Crash-recovery method: flush working memory down to the initial system
+    /// messages and bootstrap a lean context from externalized state in SQLite.
+    ///
+    /// After calling this the orchestrator retains its system prompt, agents.md,
+    /// and skills catalog messages, plus a single synthetic system message that
+    /// summarises the active goal, threads, and worksets so it can resume work
+    /// without re-reading the full conversation history.
+    pub fn lean_resume(&mut self) -> anyhow::Result<()> {
+        // Step 1: Keep only initial system messages.
+        let system_count = self
+            .messages
+            .iter()
+            .take_while(|m| matches!(m, Message::System { .. }))
+            .count();
+        self.messages.truncate(system_count);
+
+        // Step 2: Build bootstrap context from SQLite.
+        let store_path = self.tool_runtime.store_path.clone();
+        let session_id = self.tool_runtime.session_id.clone();
+
+        let mut bootstrap = String::from(
+            "Working memory was reset because the prior context exceeded the model's context window.\n\
+             All thread episodes, workset state, and goal state are intact in the persistent store.\n\
+             Use thread_read(name) to retrieve any thread's episode history.\n\
+             Use workset_read(id) to retrieve workset details.\n\
+             Use threads() to see all available threads.\n\n",
+        );
+
+        if let Some(ref sid) = session_id {
+            // Goal state
+            if let Ok(Some(goal)) = crate::goal::load_goal(&store_path, sid) {
+                bootstrap.push_str(&format!(
+                    "## Active Goal\nObjective: {}\nStatus: {}\nTokens used: {} | Time: {}s\n\n",
+                    goal.objective,
+                    goal.status.label(),
+                    goal.tokens_used,
+                    goal.time_used_seconds
+                ));
+            }
+
+            // Thread listing
+            if let Ok(threads) = crate::store::list_threads(&store_path, sid) {
+                if !threads.is_empty() {
+                    bootstrap.push_str("## Threads\n");
+                    for t in &threads {
+                        bootstrap.push_str(&format!(
+                            "- {} ({} episodes)\n",
+                            t.name, t.episode_count
+                        ));
+                    }
+                    bootstrap.push('\n');
+                }
+            }
+
+            // Workset listing
+            if let Ok(worksets) = crate::store::list_worksets(&store_path, sid) {
+                if !worksets.is_empty() {
+                    bootstrap.push_str("## Worksets\n");
+                    for ws in &worksets {
+                        bootstrap.push_str(&format!(
+                            "- {} [{}] — {} ({} items)\n",
+                            ws.id, ws.status, ws.summary, ws.item_count
+                        ));
+                    }
+                    bootstrap.push('\n');
+                }
+            }
+        }
+
+        // Step 3: Inject bootstrap as a System message.
+        self.messages.push(Message::System {
+            content: bootstrap,
+        });
+
+        // Step 4: Log it.
+        tracing::warn!(
+            message_count_after = self.messages.len(),
+            "lean resume: flushed working memory, bootstrapped from externalized state"
+        );
+
+        Ok(())
     }
 
     fn emit(&self, event: AgentEvent) {

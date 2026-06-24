@@ -523,6 +523,7 @@ impl WorkerTimeoutTrace {
             AgentEvent::GoalContinuation { .. }
             | AgentEvent::GoalTurnAccounted { .. }
             | AgentEvent::GoalErrorTransition { .. } => {}
+            AgentEvent::LeanResumeTriggered { .. } => {}
         }
     }
 

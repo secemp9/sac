@@ -115,6 +115,10 @@ pub enum AgentEvent {
         new_status: String,
         error_message: String,
     },
+    LeanResumeTriggered {
+        thread_name: Option<String>,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Default)]

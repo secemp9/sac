@@ -212,6 +212,32 @@ pub fn list_sessions(path: &Path) -> Result<Vec<SessionSummary>> {
     Ok(sessions)
 }
 
+pub fn archive_messages(path: &Path, session_id: &str) -> Result<()> {
+    tracing::debug!(session_id = %session_id, db_path = %path.display(), "archiving messages");
+    let conn = crate::store::open_connection(path)?;
+    conn.execute(
+        "UPDATE sessions SET archived_messages_json = messages_json WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tracing::info!(session_id = %session_id, db_path = %path.display(), "messages archived");
+    Ok(())
+}
+
+pub fn messages_json_byte_size(path: &Path, session_id: &str) -> Result<Option<usize>> {
+    tracing::debug!(session_id = %session_id, db_path = %path.display(), "querying messages_json byte size");
+    let conn = crate::store::open_connection(path)?;
+    let size: Option<usize> = conn
+        .query_row(
+            "SELECT LENGTH(messages_json) FROM sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    tracing::info!(session_id = %session_id, db_path = %path.display(), byte_size = ?size, "queried messages_json byte size");
+    Ok(size)
+}
+
 fn insert_or_replace_session(
     tx: &rusqlite::Transaction<'_>,
     snapshot: &SessionSnapshot,
