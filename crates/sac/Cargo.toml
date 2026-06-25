@@ -1,7 +1,21 @@
 [package]
-name = "sac"
+name = "sac-cli"
 version = "0.1.0"
 edition = "2021"
+description = "Terminal-based AI coding agent — fork of NAC with extended backend support and context management"
+license = "MIT"
+repository = "https://github.com/secemp9/sac"
+readme = "../../README.md"
+keywords = ["ai", "coding-agent", "terminal", "deepseek", "openai"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "sac"
+path = "src/main.rs"
+
+[lib]
+name = "sac"
+path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
